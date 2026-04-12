@@ -2,6 +2,7 @@
   "name": "haberuygulamasi",
   "private": true,
   "version": "0.0.0",
+  "homepage": "https://Bilgin88.github.io/HaberUygulamasi",
   "type": "module",
   "scripts": {
     "dev": "vite",
