@@ -21,7 +21,7 @@ const CATEGORIES = ["Tümü", "Gündem", "Ekonomi", "Spor", "Teknoloji", "Dünya
 const PROXIES = [
   { name: "RSS2JSON", fn: (url) => `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(url)}&nocache=${Date.now()}` },
   { name: "AllOrigins", fn: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
-  { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}&cb=${Date.now()}` }
+  { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` }
 ];
 
 function App() {
@@ -32,15 +32,18 @@ function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(24);
+  const [visibleCount, setVisibleCount] = useState(40);
   const [lastSyncTs, setLastSyncTs] = useState(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
   
   const isRunning = useRef(false);
   const isDragging = useRef(false);
   const startX = useRef(0);
 
   useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 1024);
+    window.addEventListener('resize', handleResize);
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'dark') {
       setDarkMode(true);
@@ -51,13 +54,13 @@ function App() {
     if (isRunning.current) return;
     isRunning.current = true;
     startApp();
-    const interval = setInterval(checkSyncInterval, 60000);
-    return () => { clearInterval(interval); window.removeEventListener('scroll', handleScroll); };
+    const interval = setInterval(checkSyncInterval, 50000);
+    return () => { clearInterval(interval); window.removeEventListener('scroll', handleScroll); window.removeEventListener('resize', handleResize); };
   }, []);
 
   const startApp = async () => {
     setLoading(true);
-    const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(300));
+    const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(400));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setAllNews(mixWithDiversity(data));
@@ -108,7 +111,7 @@ function App() {
       for (const proxy of PROXIES) {
         if (foundSource) break;
         try {
-          const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(7000) });
+          const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(8000) });
           if (!res.ok) continue;
           if (proxy.name === "RSS2JSON") {
             const data = await res.json();
@@ -116,7 +119,6 @@ function App() {
                const processed = data.items.map(item => parseItem(item, source.name));
                allNewItems.push(...processed.filter(it => it.publishedAt !== "N/A"));
                foundSource = true;
-               console.log(`✅ ${source.name} aktif edildi (${proxy.name})`);
             }
           } else {
             let xml = (proxy.name === "AllOrigins") ? (await res.json()).contents : await res.text();
@@ -126,7 +128,6 @@ function App() {
               const processed = items.map(item => parseXmlItem(item, source.name)).filter(it => it.publishedAt !== "N/A");
               allNewItems.push(...processed);
               foundSource = true;
-              console.log(`✅ ${source.name} aktif edildi (${proxy.name})`);
             }
           }
         } catch (e) { }
@@ -141,11 +142,11 @@ function App() {
     const dateObj = rawDate ? new Date(rawDate) : null;
     return {
       title: (item.title || "").trim(),
-      description: (item.description || "").replace(/<[^>]*>?/gm, '').substring(0, 180),
+      description: (item.description || "").substring(0, 180),
       url: item.link || item.url,
       image: item.enclosure?.link || item.thumbnail || "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80",
       source: source,
-      category: categorize((item.title || "") + " " + (item.description || "")),
+      category: categorize((item.title || "")),
       publishedAt: (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A"
     };
   };
@@ -162,7 +163,7 @@ function App() {
       url: item.querySelector("link")?.textContent || item.querySelector("link")?.getAttribute("href") || "#",
       image: img || "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80",
       source: source,
-      category: categorize((item.querySelector("title")?.textContent || "") + " " + desc),
+      category: categorize((item.querySelector("title")?.textContent || "")),
       publishedAt: (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A"
     };
   };
@@ -189,14 +190,15 @@ function App() {
   };
 
   const filteredNews = activeCategory === "Tümü" ? allNews : allNews.filter(n => n.category === activeCategory);
-  const sliderHaberler = filteredNews.slice(0, 15);
-  const gridHaberler = filteredNews.slice(15, visibleCount + 15);
+  const sliderLimit = isMobile ? 8 : 20; 
+  const sliderHaberler = filteredNews.slice(0, sliderLimit);
+  const gridHaberler = filteredNews.slice(sliderLimit, visibleCount + sliderLimit);
 
-  const onDragStart = (e) => { isDragging.current = true; startX.current = (e.pageX || e.touches[0].pageX); };
-  const onDragEnd = (e) => {
+  const onHandleStart = (e) => { isDragging.current = true; startX.current = e.pageX || e.touches[0].pageX; };
+  const onHandleEnd = (e) => {
     if (!isDragging.current) return;
     isDragging.current = false;
-    const endX = (e.pageX || e.changedTouches[0].pageX);
+    const endX = e.pageX || e.changedTouches[0].pageX;
     const diff = startX.current - endX;
     if (Math.abs(diff) > 50) {
       if (diff > 0) setCurrentSlide(p => (p === sliderHaberler.length - 1 ? 0 : p + 1));
@@ -209,20 +211,20 @@ function App() {
       <header className="app-header">
         <div className="header-left">
           <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu/></button>
-          <div className="brand"><Flame className="brand-icon" size={28} /><span>Bilgin Haber</span></div>
+          <div className="brand" onClick={() => window.location.reload()}><Flame className="brand-icon" size={28} /><span>Bilgin Haber</span></div>
         </div>
         <nav className={`header-center ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
           {isMobileMenuOpen && <div className="mobile-nav-header"><Flame size={24}/><span>Kategoriler</span><button onClick={()=>setIsMobileMenuOpen(false)}><X/></button></div>}
           {CATEGORIES.map(cat => (
-            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => {setActiveCategory(cat); setVisibleCount(24); setCurrentSlide(0); window.scrollTo({top:0, behavior:'smooth'}); setIsMobileMenuOpen(false);}}>{cat}</button>
+            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => {setActiveCategory(cat); setVisibleCount(40); setCurrentSlide(0); window.scrollTo({top:0, behavior:'smooth'}); setIsMobileMenuOpen(false);}}>{cat}</button>
           ))}
         </nav>
         <div className="header-right">
            <button className="icon-btn refresh-trigger" onClick={loadSync} disabled={syncing} title="Hemen Tazele"><RefreshCw size={20} className={syncing ? "spin" : ""} /></button>
            <button className="icon-btn" onClick={() => {
             const m = !darkMode; setDarkMode(m);
-            document.documentElement.setAttribute('data-theme', m ? 'dark':'light');
-            localStorage.setItem('theme', m ? 'dark':'light');
+            document.documentElement.setAttribute('data-theme', m ? 'dark' : 'light');
+            localStorage.setItem('theme', m ? 'dark' : 'light');
            }} title="Tema Değiştir">{darkMode ? <Sun/> : <Moon/>}</button>
         </div>
       </header>
@@ -242,7 +244,7 @@ function App() {
              
              {sliderHaberler.length > 0 && (
                <section className="hero-grid-wrapper">
-                  <div className="slider-main" onMouseDown={onDragStart} onMouseUp={onDragEnd} onTouchStart={onDragStart} onTouchEnd={onDragEnd}>
+                  <div className="slider-main" onMouseDown={onHandleStart} onMouseUp={onHandleEnd} onTouchStart={onHandleStart} onTouchEnd={onHandleEnd}>
                     <div className="slider-track" style={{ transform: `translateX(-${currentSlide * 100}%)` }}>
                       {sliderHaberler.map((item, index) => (
                         <div key={item.id || index} className="slide">
@@ -256,15 +258,17 @@ function App() {
                         </div>
                       ))}
                     </div>
-                    <button className="slider-nav-web prev" onClick={() => setCurrentSlide(p => p===0 ? sliderHaberler.length-1 : p-1)}><ChevronRight style={{transform:'rotate(180deg)'}}/></button>
-                    <button className="slider-nav-web next" onClick={() => setCurrentSlide(p => p===sliderHaberler.length-1 ? 0 : p+1)}><ChevronRight/></button>
+                    {/* FIXED NUMERATOR CONTAINER */}
                     <div className="slider-numbers-container">
-                       {sliderHaberler.map((_, idx) => (
-                         <button key={idx} className={`slider-num-btn ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>{idx + 1}</button>
-                       ))}
+                       <div className="num-scroll-helper">
+                          {sliderHaberler.map((_, idx) => (
+                            <button key={idx} className={`slider-num-btn ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>{idx + 1}</button>
+                          ))}
+                       </div>
                     </div>
                   </div>
-                  <div className="slider-aside">
+                  
+                  <aside className="slider-aside">
                      {sliderHaberler.slice(0, 6).map((item, idx) => (
                        <div key={idx} className={`aside-card ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>
                           <span className="aside-num">{idx + 1}</span>
@@ -274,29 +278,38 @@ function App() {
                           </div>
                        </div>
                      ))}
-                  </div>
+                  </aside>
                </section>
              )}
 
-             <section style={{marginTop:'3rem'}}>
+             {/* MAIN GRID SECTION - SEPARATED BY MARGIN AND CLEARANCE */}
+             <section className="main-grid-section">
                 <h2 className="grid-header">En Yeni Gelişmeler</h2>
                 <div className="news-grid">
                    {gridHaberler.map((item, idx) => (
                      <article key={item.id || idx} className="news-card">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="card-media">
-                          <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src="https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80"; }} />
+                        <div className="card-media">
+                          <a href={item.url} target="_blank" rel="noopener noreferrer">
+                             <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src="https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80"; }} />
+                          </a>
                           <span className="card-badge">{item.source}</span>
-                        </a>
+                        </div>
                         <div className="card-body">
-                          <div className="card-top"><span className="card-cat">{item.category}</span><span className="card-time">{formatDistanceToNow(new Date(item.publishedAt), { addSuffix: true, locale: tr })}</span></div>
+                          <div className="card-top">
+                             <span className="card-cat">{item.category}</span>
+                             <span className="card-sep">•</span>
+                             <span className="card-time">{formatDistanceToNow(new Date(item.publishedAt), { addSuffix: true, locale: tr })}</span>
+                          </div>
                           <h2 className="card-title">{item.title}</h2>
-                          <div className="card-bottom"><a href={item.url} target="_blank" rel="noopener noreferrer" className="btn-read">Habere Git <ExternalLink size={14}/></a></div>
+                          <div className="card-footer">
+                             <a href={item.url} target="_blank" rel="noopener noreferrer" className="btn-read">Habere Git <ExternalLink size={14}/></a>
+                          </div>
                         </div>
                      </article>
                    ))}
                 </div>
                 {visibleCount < filteredNews.length && (
-                   <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount(p => p + 12)}> Daha Fazla </button></div>
+                   <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount(p => p + 15)}> Daha Fazla Haber </button></div>
                 )}
              </section>
           </div>
@@ -304,87 +317,78 @@ function App() {
       </main>
 
       <button className={`scroll-to-top ${showScrollTop ? 'visible' : ''}`} onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={24}/></button>
-      <footer className="app-footer"><p>© 2026 Bilgin Haber - Akıllı Portallar</p></footer>
+      <footer className="app-footer"><div className="footer-content"><Flame size={20}/> <span>Bilgin Haber © 2026 - Tüm Hakları Saklıdır</span></div></footer>
 
       <style>{`
         :root {
           --primary: #ff3b30; --primary-dark: #d70015; --bg-main: #f8f9fa; --card-bg: #ffffff;
           --text-main: #1d1d1f; --text-secondary: #86868b; --border-color: #e5e5e5;
-          --header-bg: rgba(255, 255, 255, 0.8); --shadow-sm: 0 2px 8px rgba(0,0,0,0.05);
-          --shadow-md: 0 4px 20px rgba(0,0,0,0.08);
+          --header-bg: rgba(255, 255, 255, 0.85); --shadow-sm: 0 4px 15px rgba(0,0,0,0.05);
+          --shadow-md: 0 12px 40px rgba(0,0,0,0.12);
         }
         [data-theme='dark'] {
           --bg-main: #000000; --card-bg: #1c1c1e; --text-main: #f5f5f7;
-          --text-secondary: #a1a1a6; --border-color: #38383a; --header-bg: rgba(28, 28, 30, 0.8);
+          --text-secondary: #a1a1a6; --border-color: #38383a; --header-bg: rgba(18, 18, 18, 0.85);
         }
 
-        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-main); color: var(--text-main); transition: background 0.3s; }
-        .app-header { position: sticky; top: 0; z-index: 1000; height: 70px; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; background: var(--header-bg); backdrop-filter: saturate(180%) blur(20px); border-bottom: 1px solid var(--border-color); }
-        .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 1.4rem; color: var(--primary); }
-        .header-center { display: flex; gap: 20px; }
-        .nav-link { background: none; border: none; font-weight: 600; color: var(--text-secondary); cursor: pointer; transition: 0.2s; padding: 8px 12px; border-radius: 8px; }
-        .nav-link:hover { color: var(--text-main); background: var(--border-color); }
-        .nav-link.active { color: var(--primary); background: rgba(255, 59, 48, 0.1); }
-        .header-right { display: flex; align-items: center; gap: 10px; }
-        .icon-btn { background: none; border: none; color: var(--text-main); cursor: pointer; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border-radius: 50%; transition: 0.2s; }
-        .icon-btn:hover { background: var(--border-color); }
-
-        .main-container { max-width: 1300px; margin: 0 auto; padding: 2rem 5%; }
-        .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
-        .status-pill { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; background: var(--border-color); padding: 6px 14px; border-radius: 20px; color: var(--text-secondary); }
-        .status-pill.syncing { color: var(--primary); background: rgba(255, 59, 48, 0.1); }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-main); color: var(--text-main); transition: 0.3s; overflow-x: hidden; touch-action: pan-y; }
         
-        .hero-grid-wrapper { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; height: 500px; }
-        .slider-main { position: relative; border-radius: 20px; overflow: hidden; background: #000; cursor: grab; }
-        .slider-track { display: flex; height: 100%; transition: transform 0.6s cubic-bezier(0.2, 1, 0.3, 1); }
-        .slide { flex: 0 0 100%; position: relative; }
-        .slide-img { width: 100%; height: 100%; object-fit: cover; opacity: 0.85; }
-        .slide-content { position: absolute; bottom: 0; left: 0; width: 100%; padding: 60px 30px 40px; background: linear-gradient(transparent, rgba(0,0,0,0.9)); color: white; }
-        .slide-title { font-size: 2rem; font-weight: 800; line-height: 1.2; margin: 10px 0 0; }
-        .source-tag { background: var(--primary); padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 0.8rem; margin-right: 10px; }
+        .app-header { position: sticky; top: 0; z-index: 1000; height: 75px; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; background: var(--header-bg); backdrop-filter: saturate(180%) blur(25px); border-bottom: 1px solid var(--border-color); }
+        .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.5rem; color: var(--primary); cursor: pointer; }
 
-        .aside-card { display: flex; gap: 12px; padding: 12px; border-radius: 12px; background: var(--card-bg); cursor: pointer; border: 1px solid var(--border-color); transition: 0.2s; }
+        .main-container { max-width: 1400px; margin: 0 auto; padding: 0 5% 5rem; }
+        .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0 2rem; position: relative; z-index: 5; }
+
+        /* HERO WRAPPER - STRUCTURAL FIX */
+        .hero-grid-wrapper { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; height: 500px; margin-bottom: 4.5rem; position: relative; z-index: 20; }
+        
+        .slider-main { position: relative; border-radius: 28px; overflow: hidden; background: #000; box-shadow: var(--shadow-md); height: 100%; cursor: grab; }
+        .slider-track { display: flex; height: 100%; transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1); pointer-events: none; }
+        .slide { flex: 0 0 100%; height: 100%; position: relative; pointer-events: auto; }
+        .slide-img { width: 100%; height: 100%; object-fit: cover; opacity: 0.8; -webkit-user-drag: none; }
+        
+        .slide-content { position: absolute; bottom: 0; left: 0; width: 100%; padding: 120px 45px 85px; background: linear-gradient(transparent, rgba(0,0,0,0.95)); color: white; pointer-events: none; }
+        .slide-meta { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+        .slide-title { font-size: 2.1rem; font-weight: 900; line-height: 1.2; margin: 0; }
+
+        /* NUMERATOR AREA */
+        .slider-numbers-container { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); z-index: 100; max-width: 90%; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 50px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+        .num-scroll-helper { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+        .num-scroll-helper::-webkit-scrollbar { display: none; }
+        .slider-num-btn { background: rgba(255,255,255,0.25); color: white; border: none; min-width: 32px; height: 32px; border-radius: 50%; font-size: 0.9rem; font-weight: 900; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .slider-num-btn.active { background: var(--primary); transform: scale(1.1); box-shadow: 0 4px 15px rgba(255, 59, 48, 0.4); }
+
+        /* LIST & GRID CARDS */
+        .slider-aside { display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; scrollbar-width: none; }
+        .aside-card { display: flex; gap: 15px; padding: 16px; border-radius: 20px; background: var(--card-bg); cursor: pointer; border: 1px solid var(--border-color); }
         .aside-card.active { border-color: var(--primary); background: rgba(255, 59, 48, 0.05); }
-        .aside-num { font-size: 1.2rem; font-weight: 900; color: var(--primary); opacity: 0.3; }
-        .aside-title { font-size: 0.9rem; font-weight: 600; color: var(--text-main); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
-        .news-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 25px; }
-        .news-card { background: var(--card-bg); border-radius: 20px; overflow: hidden; border: 1px solid var(--border-color); transition: 0.3s; box-shadow: var(--shadow-sm); }
-        .news-card:hover { transform: translateY(-8px); box-shadow: var(--shadow-md); border-color: var(--primary); }
-        .card-media { height: 200px; display: block; position: relative; }
-        .card-img { width: 100%; height: 100%; object-fit: cover; }
-        .card-badge { position: absolute; top: 15px; right: 15px; background: var(--primary); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }
-        .card-body { padding: 20px; }
-        .card-title { font-size: 1.1rem; font-weight: 700; margin: 12px 0; color: var(--text-main); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
-        .card-top { display: flex; justify-content: space-between; font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); }
-        .btn-read { color: var(--primary); text-decoration: none; font-weight: 800; font-size: 0.85rem; display: flex; align-items: center; gap: 4px; margin-top: 15px; }
+        /* SECTION SEPARATION */
+        .main-grid-section { position: relative; z-index: 10; padding-top: 1rem; clear: both; }
+        .news-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
+        .news-card { background: var(--card-bg); border-radius: 28px; overflow: hidden; border: 1px solid var(--border-color); display: flex; flex-direction: column; transition: 0.3s; box-shadow: var(--shadow-sm); }
+        .card-media { height: 220px; position: relative; overflow: hidden; }
+        .card-badge { position: absolute; top: 15px; right: 15px; background: var(--primary); color: white; padding: 6px 12px; border-radius: 10px; font-size: 0.75rem; font-weight: 900; z-index: 10; }
 
-        .loading-container { height: 60vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        .spinner { width: 40px; height: 40px; border: 4px solid var(--border-color); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .spin { animation: spin 1s linear infinite; }
+        .card-body { padding: 25px; flex-grow: 1; display: flex; flex-direction: column; }
+        .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+        .card-cat { color: var(--primary); font-weight: 900; font-size: 0.8rem; text-transform: uppercase; }
+        .card-time { color: var(--text-secondary); font-size: 0.85rem; font-weight: 600; }
+        .card-title { font-size: 1.25rem; font-weight: 800; line-height: 1.4; color: var(--text-main); margin-bottom: 20px; }
+        .btn-read { color: var(--primary); font-weight: 900; text-decoration: none; display: flex; align-items: center; gap: 6px; margin-top: auto; }
 
-        .slider-numbers-container { position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; z-index: 20; background: rgba(0,0,0,0.5); padding: 6px 12px; border-radius: 30px; backdrop-filter: blur(5px); }
-        .slider-num-btn { background: rgba(255,255,255,0.2); color: white; border: none; width: 24px; height: 24px; border-radius: 50%; font-size: 0.7rem; font-weight: 700; cursor: pointer; transition: 0.2s; }
-        .slider-num-btn.active { background: var(--primary); transform: scale(1.1); }
-        .slider-nav-web { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.4); border: none; color: white; width: 44px; height: 44px; border-radius: 50%; cursor: pointer; z-index: 25; display: flex; align-items: center; justify-content: center; transition: 0.3s; }
-        .slider-nav-web:hover { background: var(--primary); }
-        .slider-nav-web.prev { left: 15px; }
-        .slider-nav-web.next { right: 15px; }
+        .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 9999; cursor: pointer; }
+        .scroll-to-top.visible { opacity: 1; visibility: visible; }
 
-        @media (max-width: 1000px) {
+        @media (max-width: 1024px) {
           .news-grid { grid-template-columns: repeat(2, 1fr); }
-          .hero-grid-wrapper { grid-template-columns: 1fr; height: auto; }
-          .slider-aside { display: none; }
-          .slider-main { height: 400px; }
-          .slide-title { font-size: 1.5rem; }
+          .hero-grid-wrapper { grid-template-columns: 1fr; height: auto; margin-bottom: 2rem; }
+          .slider-main { height: 380px; }
+          .news-card { border-radius: 20px; }
         }
         @media (max-width: 600px) {
-          .app-header { padding: 0 4%; }
-          .header-center { display: none; }
-          .header-center.mobile-open { display: flex; flex-direction: column; position: fixed; top: 0; left: 0; width: 100%; height: 100vh; background: var(--card-bg); z-index: 1001; padding: 20px; }
-          .mobile-nav-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; margin-bottom: 20px; color: var(--primary); font-weight: 800; font-size: 1.2rem; }
-          .news-grid { grid-template-columns: 1fr; }
+          .slider-main { height: 320px; }
+          .slide-title { font-size: 1.4rem; padding: 0 20px; }
         }
       `}</style>
     </div>
