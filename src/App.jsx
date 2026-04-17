@@ -258,7 +258,6 @@ function App() {
                         </div>
                       ))}
                     </div>
-                    {/* FIXED NUMERATOR CONTAINER */}
                     <div className="slider-numbers-container">
                        <div className="num-scroll-helper">
                           {sliderHaberler.map((_, idx) => (
@@ -282,7 +281,6 @@ function App() {
                </section>
              )}
 
-             {/* MAIN GRID SECTION - SEPARATED BY MARGIN AND CLEARANCE */}
              <section className="main-grid-section">
                 <h2 className="grid-header">En Yeni Gelişmeler</h2>
                 <div className="news-grid">
@@ -333,62 +331,69 @@ function App() {
 
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-main); color: var(--text-main); transition: 0.3s; overflow-x: hidden; touch-action: pan-y; }
         
+        /* HEADER & NAVIGATION */
         .app-header { position: sticky; top: 0; z-index: 1000; height: 75px; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; background: var(--header-bg); backdrop-filter: saturate(180%) blur(25px); border-bottom: 1px solid var(--border-color); }
         .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.5rem; color: var(--primary); cursor: pointer; }
+        .header-center { display: flex; gap: 15px; }
+        .nav-link { background: none; border: none; color: var(--text-secondary); font-weight: 700; cursor: pointer; transition: 0.3s; padding: 8px 12px; }
+        .nav-link.active { color: var(--primary); }
+        .mobile-menu-btn { display: none; background: none; border: none; color: var(--text-main); cursor: pointer; }
+
+        /* PILLS & STATUS */
+        .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0 2rem; }
+        .status-pill, .sort-label { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 900; background: var(--card-bg); padding: 10px 22px; border-radius: 40px; border: 1px solid var(--border-color); color: var(--text-secondary); box-shadow: var(--shadow-sm); }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .spin { animation: spin 2s linear infinite; }
 
         .main-container { max-width: 1400px; margin: 0 auto; padding: 0 5% 5rem; }
-        .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0 2rem; position: relative; z-index: 5; }
-
-        /* HERO WRAPPER - STRUCTURAL FIX */
-        .hero-grid-wrapper { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; height: 500px; margin-bottom: 4.5rem; position: relative; z-index: 20; }
         
+        /* HERO AREA - STABLE */
+        .hero-grid-wrapper { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; height: 500px; margin-bottom: 4.5rem; position: relative; z-index: 20; }
         .slider-main { position: relative; border-radius: 28px; overflow: hidden; background: #000; box-shadow: var(--shadow-md); height: 100%; cursor: grab; }
         .slider-track { display: flex; height: 100%; transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1); pointer-events: none; }
         .slide { flex: 0 0 100%; height: 100%; position: relative; pointer-events: auto; }
         .slide-img { width: 100%; height: 100%; object-fit: cover; opacity: 0.8; -webkit-user-drag: none; }
-        
         .slide-content { position: absolute; bottom: 0; left: 0; width: 100%; padding: 120px 45px 85px; background: linear-gradient(transparent, rgba(0,0,0,0.95)); color: white; pointer-events: none; }
-        .slide-meta { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
         .slide-title { font-size: 2.1rem; font-weight: 900; line-height: 1.2; margin: 0; }
 
-        /* NUMERATOR AREA */
-        .slider-numbers-container { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); z-index: 100; max-width: 90%; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 50px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+        .slider-numbers-container { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); z-index: 100; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 50px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); }
         .num-scroll-helper { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
-        .num-scroll-helper::-webkit-scrollbar { display: none; }
         .slider-num-btn { background: rgba(255,255,255,0.25); color: white; border: none; min-width: 32px; height: 32px; border-radius: 50%; font-size: 0.9rem; font-weight: 900; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
-        .slider-num-btn.active { background: var(--primary); transform: scale(1.1); box-shadow: 0 4px 15px rgba(255, 59, 48, 0.4); }
+        .slider-num-btn.active { background: var(--primary); transform: scale(1.1); }
 
-        /* LIST & GRID CARDS */
         .slider-aside { display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; scrollbar-width: none; }
-        .aside-card { display: flex; gap: 15px; padding: 16px; border-radius: 20px; background: var(--card-bg); cursor: pointer; border: 1px solid var(--border-color); }
+        .aside-card { display: flex; gap: 15px; padding: 16px; border-radius: 20px; background: var(--card-bg); cursor: pointer; border: 1px solid var(--border-color); transition: 0.3s; }
         .aside-card.active { border-color: var(--primary); background: rgba(255, 59, 48, 0.05); }
 
-        /* SECTION SEPARATION */
+        /* GRID & CARDS - BUTTON FIX */
         .main-grid-section { position: relative; z-index: 10; padding-top: 1rem; clear: both; }
         .news-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
         .news-card { background: var(--card-bg); border-radius: 28px; overflow: hidden; border: 1px solid var(--border-color); display: flex; flex-direction: column; transition: 0.3s; box-shadow: var(--shadow-sm); }
         .card-media { height: 220px; position: relative; overflow: hidden; }
         .card-badge { position: absolute; top: 15px; right: 15px; background: var(--primary); color: white; padding: 6px 12px; border-radius: 10px; font-size: 0.75rem; font-weight: 900; z-index: 10; }
-
         .card-body { padding: 25px; flex-grow: 1; display: flex; flex-direction: column; }
-        .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-        .card-cat { color: var(--primary); font-weight: 900; font-size: 0.8rem; text-transform: uppercase; }
-        .card-time { color: var(--text-secondary); font-size: 0.85rem; font-weight: 600; }
-        .card-title { font-size: 1.25rem; font-weight: 800; line-height: 1.4; color: var(--text-main); margin-bottom: 20px; }
-        .btn-read { color: var(--primary); font-weight: 900; text-decoration: none; display: flex; align-items: center; gap: 6px; margin-top: auto; }
+        .card-title { font-size: 1.25rem; font-weight: 800; line-height: 1.4; color: var(--text-main); margin-bottom: 25px; }
+        
+        /* PREMIUM HABERE GİT BUTTON */
+        .card-footer { margin-top: auto; padding-top: 15px; border-top: 1px solid var(--border-color); }
+        .btn-read { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--primary); color: white; padding: 12px 20px; border-radius: 15px; font-weight: 800; text-decoration: none; transition: 0.3s; border: none; cursor: pointer; }
+        .btn-read:hover { background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255, 59, 48, 0.3); }
 
-        .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 9999; cursor: pointer; }
+        /* MISC */
+        .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); }
         .scroll-to-top.visible { opacity: 1; visibility: visible; }
-
+        
         @media (max-width: 1024px) {
+          .mobile-menu-btn { display: block; }
+          .header-center { position: fixed; top: 0; left: -105%; width: 280px; height: 100vh; background: var(--card-bg); flex-direction: column; align-items: flex-start; padding: 25px; transition: 0.4s cubic-bezier(0.16, 1, 0.3, 1); z-index: 2000; box-shadow: 20px 0 50px rgba(0,0,0,0.2); }
+          .header-center.mobile-open { left: 0; }
           .news-grid { grid-template-columns: repeat(2, 1fr); }
           .hero-grid-wrapper { grid-template-columns: 1fr; height: auto; margin-bottom: 2rem; }
           .slider-main { height: 380px; }
-          .news-card { border-radius: 20px; }
+          .slider-aside { display: none; }
         }
         @media (max-width: 600px) {
           .slider-main { height: 320px; }
-          .slide-title { font-size: 1.4rem; padding: 0 20px; }
         }
       `}</style>
     </div>
