@@ -24,6 +24,100 @@ const PROXIES = [
   { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` }
 ];
 
+const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80";
+const SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+const MAX_ALLOWED_FUTURE_MS = 10 * 60 * 1000;
+
+const decodeHtmlEntities = (value = "") => {
+  if (!value || typeof document === "undefined") return value || "";
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+};
+
+const normalizeText = (value = "") =>
+  decodeHtmlEntities(String(value))
+    .replace(/\s+/g, " ")
+    .trim();
+
+const normalizeNewsItem = (item) => ({
+  ...item,
+  title: normalizeText(item.title),
+  description: normalizeText(item.description),
+  source: normalizeText(item.source),
+  category: normalizeText(item.category),
+});
+
+const getPublishedDate = (value) => {
+  if (!value) return null;
+  if (value?.toDate && typeof value.toDate === "function") return value.toDate();
+  if (typeof value?.seconds === "number") return new Date(value.seconds * 1000);
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getEffectivePublishedDate = (value) => {
+  const date = getPublishedDate(value);
+  if (!date) return null;
+
+  const now = Date.now();
+  const timestamp = date.getTime();
+
+  if (timestamp > now + FUTURE_TOLERANCE_MS) {
+    return new Date(0);
+  }
+
+  if (timestamp > now) {
+    return new Date(now);
+  }
+
+  return date;
+};
+
+const isValidPublishedAt = (value) => {
+  const date = getPublishedDate(value);
+  if (!date) return false;
+
+  return date.getTime() <= Date.now() + MAX_ALLOWED_FUTURE_MS;
+};
+
+const getPublishedTime = (value) => {
+  const date = getEffectivePublishedDate(value);
+  return date ? date.getTime() : 0;
+};
+
+const formatPublishedDistance = (value) => {
+  const originalDate = getPublishedDate(value);
+  if (!originalDate) return "Tarih yok";
+
+  if (originalDate.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
+    return "Az önce";
+  }
+
+  const date = getEffectivePublishedDate(value);
+  return date ? formatDistanceToNow(date, { addSuffix: true, locale: tr }) : "Tarih yok";
+};
+
+const sortNewsByDate = (items = []) =>
+  [...items].sort((a, b) => getPublishedTime(b.publishedAt) - getPublishedTime(a.publishedAt));
+
+const mergeSourceItems = (items = []) => {
+  const seen = new Map();
+
+  for (const item of items) {
+    if (!item?.url || item.url === "#" || item.publishedAt === "N/A") continue;
+
+    const existing = seen.get(item.url);
+    if (!existing || getPublishedTime(item.publishedAt) > getPublishedTime(existing.publishedAt)) {
+      seen.set(item.url, item);
+    }
+  }
+
+  return sortNewsByDate(Array.from(seen.values()));
+};
+
 function App() {
   const [allNews, setAllNews] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -62,92 +156,87 @@ function App() {
     setLoading(true);
     const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(400));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setAllNews(mixWithDiversity(data));
+      const data = snapshot.docs.map(doc => normalizeNewsItem({ id: doc.id, ...doc.data() }));
+      setAllNews(sortNewsByDate(data));
       setLoading(false);
-      if (snapshot.empty) loadSync();
     }, () => setLoading(false));
     checkSyncInterval();
     return () => unsubscribe();
   };
 
-  const mixWithDiversity = (data) => {
-    if (!data || data.length === 0) return [];
-    const sorted = [...data].sort((a,b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-    const result = [];
-    const usedIds = new Set();
-    const sources = [...new Set(sorted.map(n => n.source))];
-    const grouped = sources.map(s => sorted.filter(n => n.source === s));
-    for (let i = 0; i < 50; i++) {
-      grouped.forEach(list => {
-        if (list[i] && !usedIds.has(list[i].id)) {
-          result.push(list[i]);
-          usedIds.add(list[i].id);
-        }
-      });
-    }
-    const remainder = sorted.filter(s => !usedIds.has(s.id));
-    return [...result, ...remainder];
-  };
-
-  const checkSyncInterval = async () => {
+  const checkSyncInterval = async (force = false) => {
     try {
       const syncRef = doc(db, "settings", "lastSync");
       const syncDoc = await getDoc(syncRef);
       const now = Date.now();
       const lastTime = syncDoc.data()?.time?.toMillis?.() || 0;
       setLastSyncTs(lastTime);
-      if (now - lastTime > 300000) loadSync();
-    } catch (e) { loadSync(); }
+      if (force || !lastTime || now - lastTime > SYNC_INTERVAL_MS) {
+        await loadSync(force);
+      }
+    } catch (e) {
+      await loadSync(force);
+    }
   };
 
-  const loadSync = async () => {
+  const loadSync = async (force = false) => {
     if (syncing) return;
     setSyncing(true);
-    try { await setDoc(doc(db, "settings", "lastSync"), { time: serverTimestamp() }); } catch(e){}
-    const allNewItems = [];
-    for (const source of RSS_SOURCES) {
-      let foundSource = false;
-      for (const proxy of PROXIES) {
-        if (foundSource) break;
-        try {
-          const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(8000) });
-          if (!res.ok) continue;
-          if (proxy.name === "RSS2JSON") {
-            const data = await res.json();
-            if (data.status === 'ok') {
-               const processed = data.items.map(item => parseItem(item, source.name));
-               allNewItems.push(...processed.filter(it => it.publishedAt !== "N/A"));
-               foundSource = true;
+    try {
+      const allNewItems = [];
+      for (const source of RSS_SOURCES) {
+        const sourceItems = [];
+
+        for (const proxy of PROXIES) {
+          try {
+            const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(8000) });
+            if (!res.ok) continue;
+
+            if (proxy.name === "RSS2JSON") {
+              const data = await res.json();
+              if (data.status === 'ok') {
+                 const processed = data.items.map(item => parseItem(item, source.name));
+                 sourceItems.push(...processed);
+              }
+            } else {
+              let xml = (proxy.name === "AllOrigins") ? (await res.json()).contents : await res.text();
+              if (xml && xml.includes("<item")) {
+                const docParsed = new DOMParser().parseFromString(xml, "text/xml");
+                const items = Array.from(docParsed.querySelectorAll("item, entry")).slice(0, 50);
+                const processed = items.map(item => parseXmlItem(item, source.name));
+                sourceItems.push(...processed);
+              }
             }
-          } else {
-            let xml = (proxy.name === "AllOrigins") ? (await res.json()).contents : await res.text();
-            if (xml && xml.includes("<item")) {
-              const docParsed = new DOMParser().parseFromString(xml, "text/xml");
-              const items = Array.from(docParsed.querySelectorAll("item, entry")).slice(0, 30);
-              const processed = items.map(item => parseXmlItem(item, source.name)).filter(it => it.publishedAt !== "N/A");
-              allNewItems.push(...processed);
-              foundSource = true;
-            }
-          }
-        } catch (e) { }
+          } catch (e) { }
+        }
+
+        allNewItems.push(...mergeSourceItems(sourceItems).slice(0, 30));
       }
+
+      if (allNewItems.length > 0) {
+        await saveToFirestoreBatch(allNewItems);
+      }
+
+      await setDoc(doc(db, "settings", "lastSync"), { time: serverTimestamp() }, { merge: true });
+      setLastSyncTs(Date.now());
+    } finally {
+      setSyncing(false);
     }
-    if (allNewItems.length > 0) saveToFirestoreBatch(allNewItems);
-    setSyncing(false);
   };
 
   const parseItem = (item, source) => {
     const rawDate = item.pubDate || item.published;
     const dateObj = rawDate ? new Date(rawDate) : null;
+    const publishedAt = (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A";
+
     return {
-      title: (item.title || "").trim(),
-      description: (item.description || "").substring(0, 180),
+      title: normalizeText(item.title || ""),
+      description: normalizeText(item.description || "").substring(0, 180),
       url: item.link || item.url,
-      image: item.enclosure?.link || item.thumbnail || "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80",
-      source: source,
-      category: categorize((item.title || "")),
-      publishedAt: (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A"
+      image: item.enclosure?.link || item.thumbnail || FALLBACK_IMAGE,
+      source: normalizeText(source),
+      category: categorize(normalizeText(item.title || "")),
+      publishedAt
     };
   };
 
@@ -157,14 +246,16 @@ function App() {
     if (!img) { const m = desc.match(/<img[^>]+src="([^">]+)"/); if (m) img = m[1]; }
     const rawDate = item.querySelector("pubDate, published")?.textContent;
     const dateObj = rawDate ? new Date(rawDate) : null;
+    const publishedAt = (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A";
+
     return {
-      title: (item.querySelector("title")?.textContent || "").trim(),
-      description: desc.replace(/<[^>]*>?/gm, '').substring(0, 180).trim(),
+      title: normalizeText(item.querySelector("title")?.textContent || ""),
+      description: normalizeText(desc.replace(/<[^>]*>?/gm, '')).substring(0, 180),
       url: item.querySelector("link")?.textContent || item.querySelector("link")?.getAttribute("href") || "#",
-      image: img || "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80",
-      source: source,
-      category: categorize((item.querySelector("title")?.textContent || "")),
-      publishedAt: (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A"
+      image: img || FALLBACK_IMAGE,
+      source: normalizeText(source),
+      category: categorize(normalizeText(item.querySelector("title")?.textContent || "")),
+      publishedAt
     };
   };
 
@@ -181,7 +272,7 @@ function App() {
   const saveToFirestoreBatch = async (items) => {
     try {
       const batch = writeBatch(db);
-      items.filter(it => it.url && it.url !== "#" && it.publishedAt !== "N/A").forEach(item => {
+      items.filter(it => it.url && it.url !== "#" && it.publishedAt !== "N/A" && isValidPublishedAt(it.publishedAt)).forEach(item => {
         const id = btoa(unescape(encodeURIComponent(item.url))).substring(0, 150).replace(/\//g, '_');
         batch.set(doc(db, "news", id), { ...item, updatedAt: serverTimestamp() }, { merge: true });
       });
@@ -189,10 +280,16 @@ function App() {
     } catch (e) { }
   };
 
-  const filteredNews = activeCategory === "Tümü" ? allNews : allNews.filter(n => n.category === activeCategory);
+  const filteredNews = sortNewsByDate(
+    activeCategory === "Tümü" ? allNews : allNews.filter(n => n.category === activeCategory)
+  );
   const sliderLimit = isMobile ? 8 : 20; 
   const sliderHaberler = filteredNews.slice(0, sliderLimit);
-  const gridHaberler = filteredNews.slice(sliderLimit, visibleCount + sliderLimit);
+  const gridHaberler = filteredNews.slice(0, visibleCount);
+
+  useEffect(() => {
+    setCurrentSlide(0);
+  }, [activeCategory, allNews, sliderLimit]);
 
   const onHandleStart = (e) => { isDragging.current = true; startX.current = e.pageX || e.touches[0].pageX; };
   const onHandleEnd = (e) => {
@@ -216,11 +313,11 @@ function App() {
         <nav className={`header-center ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
           {isMobileMenuOpen && <div className="mobile-nav-header"><Flame size={24}/><span>Kategoriler</span><button onClick={()=>setIsMobileMenuOpen(false)}><X/></button></div>}
           {CATEGORIES.map(cat => (
-            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => {setActiveCategory(cat); setVisibleCount(40); setCurrentSlide(0); window.scrollTo({top:0, behavior:'smooth'}); setIsMobileMenuOpen(false);}}>{cat}</button>
+            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => {setActiveCategory(cat); setVisibleCount(40); window.scrollTo({top:0, behavior:'smooth'}); setIsMobileMenuOpen(false);}}>{cat}</button>
           ))}
         </nav>
         <div className="header-right">
-           <button className="icon-btn refresh-trigger" onClick={loadSync} disabled={syncing} title="Hemen Tazele"><RefreshCw size={20} className={syncing ? "spin" : ""} /></button>
+           <button className="icon-btn refresh-trigger" onClick={() => checkSyncInterval(true)} disabled={syncing} title="Hemen Tazele"><RefreshCw size={20} className={syncing ? "spin" : ""} /></button>
            <button className="icon-btn" onClick={() => {
             const m = !darkMode; setDarkMode(m);
             document.documentElement.setAttribute('data-theme', m ? 'dark' : 'light');
@@ -249,9 +346,9 @@ function App() {
                       {sliderHaberler.map((item, index) => (
                         <div key={item.id || index} className="slide">
                           <a href={item.url} target="_blank" rel="noopener noreferrer" className="slide-link">
-                            <img src={item.image} alt={item.title} className="slide-img" draggable="false" onError={(e) => { e.target.onerror = null; e.target.src="https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80"; }} />
+                            <img src={item.image} alt={item.title} className="slide-img" draggable="false" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
                             <div className="slide-content">
-                               <div className="slide-meta"><span className="source-tag">{item.source}</span><span className="time-tag">{formatDistanceToNow(new Date(item.publishedAt), { addSuffix: true, locale: tr })}</span></div>
+                               <div className="slide-meta"><span className="source-tag">{item.source}</span>{" "}<span className="time-tag">{formatPublishedDistance(item.publishedAt)}</span></div>
                                <h2 className="slide-title">{item.title}</h2>
                             </div>
                           </a>
@@ -272,7 +369,7 @@ function App() {
                        <div key={idx} className={`aside-card ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>
                           <span className="aside-num">{idx + 1}</span>
                           <div className="aside-info">
-                             <p className="aside-source">{item.source} • {formatDistanceToNow(new Date(item.publishedAt), { addSuffix: true, locale: tr })}</p>
+                             <p className="aside-source">{item.source} {formatPublishedDistance(item.publishedAt)}</p>
                              <h3 className="aside-title">{item.title}</h3>
                           </div>
                        </div>
@@ -288,15 +385,15 @@ function App() {
                      <article key={item.id || idx} className="news-card">
                         <div className="card-media">
                           <a href={item.url} target="_blank" rel="noopener noreferrer">
-                             <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src="https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80"; }} />
+                             <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
                           </a>
                           <span className="card-badge">{item.source}</span>
                         </div>
                         <div className="card-body">
                           <div className="card-top">
                              <span className="card-cat">{item.category}</span>
-                             <span className="card-sep">•</span>
-                             <span className="card-time">{formatDistanceToNow(new Date(item.publishedAt), { addSuffix: true, locale: tr })}</span>
+                             <span className="card-sep">&nbsp;</span>
+                             <span className="card-time">{formatPublishedDistance(item.publishedAt)}</span>
                           </div>
                           <h2 className="card-title">{item.title}</h2>
                           <div className="card-footer">
@@ -307,7 +404,7 @@ function App() {
                    ))}
                 </div>
                 {visibleCount < filteredNews.length && (
-                   <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount(p => p + 15)}> Daha Fazla Haber </button></div>
+                   <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount(p => p + 15)}>Daha Fazla Goster</button></div>
                 )}
              </section>
           </div>
@@ -353,10 +450,10 @@ function App() {
         .slider-track { display: flex; height: 100%; transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1); pointer-events: none; }
         .slide { flex: 0 0 100%; height: 100%; position: relative; pointer-events: auto; }
         .slide-img { width: 100%; height: 100%; object-fit: cover; opacity: 0.8; -webkit-user-drag: none; }
-        .slide-content { position: absolute; bottom: 0; left: 0; width: 100%; padding: 120px 45px 85px; background: linear-gradient(transparent, rgba(0,0,0,0.95)); color: white; pointer-events: none; }
-        .slide-title { font-size: 2.1rem; font-weight: 900; line-height: 1.2; margin: 0; }
+        .slide-content { position: absolute; bottom: 0; left: 0; width: 100%; padding: 96px 32px 72px; background: linear-gradient(transparent, rgba(0,0,0,0.95)); color: white; pointer-events: none; }
+        .slide-title { font-size: clamp(1.2rem, 2.4vw, 2rem); font-weight: 900; line-height: 1.15; margin: 0; max-width: min(100%, 680px); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; text-wrap: balance; word-break: break-word; }
 
-        .slider-numbers-container { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); z-index: 100; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 50px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); }
+        .slider-numbers-container { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); z-index: 100; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 50px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); }
         .num-scroll-helper { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
         .slider-num-btn { background: rgba(255,255,255,0.25); color: white; border: none; min-width: 32px; height: 32px; border-radius: 50%; font-size: 0.9rem; font-weight: 900; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
         .slider-num-btn.active { background: var(--primary); transform: scale(1.1); }
@@ -364,6 +461,9 @@ function App() {
         .slider-aside { display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; scrollbar-width: none; }
         .aside-card { display: flex; gap: 15px; padding: 16px; border-radius: 20px; background: var(--card-bg); cursor: pointer; border: 1px solid var(--border-color); transition: 0.3s; }
         .aside-card.active { border-color: var(--primary); background: rgba(255, 59, 48, 0.05); }
+        .aside-info { min-width: 0; }
+        .aside-source { font-size: 0.75rem; line-height: 1.35; color: var(--text-secondary); margin: 0 0 6px; }
+        .aside-title { font-size: 0.95rem; line-height: 1.35; margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; word-break: break-word; }
 
         /* GRID & CARDS - BUTTON FIX */
         .main-grid-section { position: relative; z-index: 10; padding-top: 1rem; clear: both; }
@@ -378,6 +478,10 @@ function App() {
         .card-footer { margin-top: auto; padding-top: 15px; border-top: 1px solid var(--border-color); }
         .btn-read { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--primary); color: white; padding: 12px 20px; border-radius: 15px; font-weight: 800; text-decoration: none; transition: 0.3s; border: none; cursor: pointer; }
         .btn-read:hover { background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255, 59, 48, 0.3); }
+        .load-more-center { display: flex; justify-content: center; margin-top: 2.75rem; }
+        .btn-more { display: inline-flex; align-items: center; justify-content: center; min-width: 220px; padding: 14px 22px; border-radius: 999px; border: 1px solid rgba(255, 59, 48, 0.18); background: linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,244,243,0.96)); color: var(--text-main); font-size: 0.98rem; font-weight: 800; letter-spacing: 0.01em; box-shadow: 0 14px 30px rgba(17, 24, 39, 0.08), inset 0 1px 0 rgba(255,255,255,0.9); cursor: pointer; transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease, background 0.22s ease; }
+        .btn-more:hover { transform: translateY(-2px); border-color: rgba(255, 59, 48, 0.35); box-shadow: 0 18px 36px rgba(255, 59, 48, 0.14), inset 0 1px 0 rgba(255,255,255,0.95); background: linear-gradient(135deg, rgba(255,255,255,1), rgba(255,238,235,1)); }
+        .btn-more:active { transform: translateY(0); box-shadow: 0 10px 20px rgba(255, 59, 48, 0.12); }
 
         /* MISC */
         .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); }
@@ -390,10 +494,13 @@ function App() {
           .news-grid { grid-template-columns: repeat(2, 1fr); }
           .hero-grid-wrapper { grid-template-columns: 1fr; height: auto; margin-bottom: 2rem; }
           .slider-main { height: 380px; }
+          .slide-content { padding: 72px 20px 64px; }
+          .slide-title { font-size: clamp(1.05rem, 4.6vw, 1.5rem); -webkit-line-clamp: 3; max-width: 100%; }
           .slider-aside { display: none; }
         }
         @media (max-width: 600px) {
           .slider-main { height: 320px; }
+          .slide-content { padding: 56px 16px 60px; }
         }
       `}</style>
     </div>
