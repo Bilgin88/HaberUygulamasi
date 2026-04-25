@@ -4,6 +4,7 @@ import { db } from './firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, getDocs, setDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { formatDistanceToNow } from 'date-fns';
 import { tr } from 'date-fns/locale';
+import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 
 const CATEGORIES = [
   "T\u00fcm\u00fc",
@@ -20,6 +21,7 @@ const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const STALE_SYNC_MS = 15 * 60 * 1000;
 const FIRESTORE_QUERY_LIMIT = 1500;
 const MAX_ITEMS_PER_SOURCE = 40;
+const DETAIL_FALLBACK_MIN_CHARS = 260;
 const RSS_SOURCES = [
   { name: "Haberturk", url: "https://www.haberturk.com/rss/manset.xml" },
   { name: "Hurriyet", url: "https://www.hurriyet.com.tr/rss/anasayfa" },
@@ -222,7 +224,220 @@ const buildGridNews = (items = [], limitCount = 40) => {
   return sortNewsByDate(gridItems);
 };
 
-function App() {
+const slugifyTitle = (value = "") =>
+  normalizeText(value)
+    .toLocaleLowerCase('tr-TR')
+    .replace(/['".,!?%:;()[\]{}]/g, "")
+    .replace(/&/g, " ve ")
+    .replace(/[^a-z0-9\u00c0-\u024f\s-]/gi, " ")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || "haber";
+
+const buildNewsRoute = (newsId = "", title = "") => {
+  const slug = slugifyTitle(title);
+  return `/haber/${slug}--${encodeURIComponent(newsId)}`;
+};
+
+const extractNewsIdFromRouteParam = (routeParam = "") => {
+  const decodedParam = routeParam ? decodeURIComponent(routeParam) : "";
+  if (!decodedParam) return "";
+
+  const separatorIndex = decodedParam.lastIndexOf("--");
+  if (separatorIndex === -1) return decodedParam;
+
+  return decodedParam.slice(separatorIndex + 2);
+};
+
+const buildDetailParagraphs = (description = "") => {
+  const normalized = normalizeText(description);
+  if (!normalized) return [];
+
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  if (sentences.length === 0) return [normalized];
+
+  const paragraphs = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    const nextValue = current ? `${current} ${sentence}` : sentence;
+    if (nextValue.length > 700 && current) {
+      paragraphs.push(current);
+      current = sentence;
+      continue;
+    }
+    current = nextValue;
+  }
+
+  if (current) {
+    paragraphs.push(current);
+  }
+
+  return paragraphs.filter(Boolean);
+};
+
+const stripMarkdownDecorations = (line = "") =>
+  normalizeText(
+    String(line)
+      .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^\*\s+/, "")
+  );
+
+const extractHaberlerArticleText = (markdown = "", title = "") => {
+  const normalizedTitle = normalizeText(title).toLowerCase();
+  const lines = String(markdown).split(/\r?\n/);
+  const startIndex = lines.findIndex((line) => stripMarkdownDecorations(line).toLowerCase() === normalizedTitle);
+
+  if (startIndex === -1) return "";
+
+  const paragraphs = [];
+  let contentStarted = false;
+
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const line = stripMarkdownDecorations(rawLine);
+    if (!line) continue;
+
+    if (/^(Kaynak:|Yorumunuzu Yazin|BIZI TAKIP EDIN|UYGULAMAMIZI INDIRIN|© Copyright|Haberler\.com:)/i.test(line)) break;
+    if (/^\d{2}\.\d{2}\.\d{4}/.test(line)) continue;
+    if (/^(Güncelleme|Guncelleme):/i.test(line)) continue;
+    if (/^(Facebook'da|Twitter'da|WhatsApp'da|Google News'de) Paylas/i.test(line)) continue;
+    if (/^(Anasayfa|Spor|Son Dakika|Maç Sonuçlari|Puan Durumu|Futbol|Besiktas|Fenerbahçe|Galatasaray|Espor)$/i.test(line)) continue;
+    if (/^\d+\.\s+/.test(line)) continue;
+    if (/^Image \d+:/i.test(line)) continue;
+    if (/^Ara$/i.test(line)) continue;
+    if (/^ÜYE GIRISI$/i.test(line)) continue;
+    if (line.length < 40 && !/^[A-ZÇĞİÖŞÜ0-9\s'".,:-]+$/i.test(line)) continue;
+
+    if (!contentStarted && !/^(##|###)/.test(rawLine) && line.length < 80) {
+      continue;
+    }
+
+    contentStarted = true;
+    paragraphs.push(line);
+  }
+
+  return normalizeText(paragraphs.join("\n\n"));
+};
+
+const extractArticleTextFromMarkdown = (markdown = "", title = "", url = "") => {
+  if (/haberler\.com/i.test(url)) {
+    const sourceSpecific = extractHaberlerArticleText(markdown, title);
+    if (sourceSpecific) return sourceSpecific;
+  }
+
+  const normalizedTitle = normalizeText(title);
+  const lines = String(markdown)
+    .split(/\r?\n/)
+    .map((line) => stripMarkdownDecorations(line))
+    .filter(Boolean);
+
+  const paragraphs = [];
+  let totalLength = 0;
+
+  for (const line of lines) {
+    if (!line) continue;
+    if (normalizedTitle && line === normalizedTitle) continue;
+    if (/^(Title:|URL Source:|Published Time:|Markdown Content:)/i.test(line)) continue;
+    if (/^https?:\/\//i.test(line)) continue;
+    if (line.startsWith("![") || line.startsWith("[")) continue;
+    if (/^(Anasayfa|Son Dakika|Guncel|Güncel|Ekonomi|Magazin|Spor|Kripto|Dünya|Dunya|Sağlık|Saglik)$/i.test(line)) continue;
+    if (line.length < 55 && !/[.!?]/.test(line)) continue;
+    if (paragraphs.includes(line)) continue;
+
+    paragraphs.push(line);
+    totalLength += line.length;
+    if (totalLength >= 8000) break;
+  }
+
+  return normalizeText(paragraphs.join("\n\n"));
+};
+
+const fetchArticleFallbackText = async (url, title = "") => {
+  if (!url) return "";
+
+  const cacheKey = `article-fallback:${url}`;
+  try {
+    const cached = sessionStorage.getItem(cacheKey);
+    if (cached) return cached;
+  } catch {
+    // ignore sessionStorage access issues
+  }
+
+  try {
+    const fallbackUrl = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
+    const res = await fetch(fallbackUrl, { signal: AbortSignal.timeout(12000) });
+    if (!res.ok) return "";
+
+    const markdown = await res.text();
+    const extracted = extractArticleTextFromMarkdown(markdown, title, url);
+    if (extracted) {
+      try {
+        sessionStorage.setItem(cacheKey, extracted);
+      } catch {
+        // ignore sessionStorage quota/access issues
+      }
+    }
+    return extracted;
+  } catch {
+    return "";
+  }
+};
+
+const DetailPageChromeStyles = () => (
+  <style>{`
+    :root {
+      --primary: #ff3b30; --primary-dark: #d70015; --bg-main: #f8f9fa; --card-bg: #ffffff;
+      --text-main: #1d1d1f; --text-secondary: #86868b; --border-color: #e5e5e7;
+      --header-bg: rgba(255,255,255,0.8); --shadow-sm: 0 4px 20px rgba(0,0,0,0.06);
+    }
+    [data-theme='dark'] {
+      --bg-main: #000000; --card-bg: #1c1c1e; --text-main: #f5f5f7; --text-secondary: #8e8e93;
+      --border-color: #2c2c2e; --header-bg: rgba(0,0,0,0.8); --shadow-sm: 0 4px 20px rgba(255,255,255,0.04);
+    }
+    .app { min-height: 100vh; background: var(--bg-main); color: var(--text-main); }
+    .app-header { position: sticky; top: 0; z-index: 1000; height: 75px; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; background: var(--header-bg); backdrop-filter: saturate(180%) blur(25px); border-bottom: 1px solid var(--border-color); }
+    .header-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+    .header-center { display: flex; gap: 15px; }
+    .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .nav-link { background: none; border: none; color: var(--text-secondary); font-weight: 700; cursor: pointer; transition: 0.3s; padding: 8px 12px; }
+    .nav-link.active { color: var(--primary); }
+    .mobile-menu-btn { display: none; background: none; border: none; color: var(--text-main); cursor: pointer; padding: 0; }
+    .mobile-nav-header { display: none; }
+    .icon-btn {
+      width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 999px; border: 1px solid var(--border-color); background: var(--card-bg); color: var(--text-main);
+      cursor: pointer; transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      box-shadow: var(--shadow-sm); padding: 0;
+    }
+    .icon-btn svg, .scroll-to-top svg { width: 20px; height: 20px; flex-shrink: 0; display: block; }
+    .icon-btn:hover { transform: translateY(-1px); border-color: rgba(255, 59, 48, 0.24); box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08); }
+    .status-pill { display: inline-flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 900; background: var(--card-bg); padding: 10px 22px; border-radius: 40px; border: 1px solid var(--border-color); color: var(--text-secondary); box-shadow: var(--shadow-sm); }
+    .main-container { max-width: 1400px; margin: 0 auto; padding: 0 5% 5rem; }
+    .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); padding: 0; }
+    .scroll-to-top.visible { opacity: 1; visibility: visible; }
+    .app-footer { padding: 2rem 5%; border-top: 1px solid var(--border-color); color: var(--text-secondary); }
+    .footer-content { display: flex; align-items: center; justify-content: center; gap: 10px; font-weight: 600; }
+    @media (max-width: 1024px) {
+      .mobile-menu-btn { display: block; }
+      .header-center { position: fixed; top: 0; left: -105%; width: 280px; height: 100vh; background: var(--card-bg); flex-direction: column; align-items: flex-start; padding: 25px; transition: 0.4s cubic-bezier(0.16, 1, 0.3, 1); z-index: 2000; box-shadow: 20px 0 50px rgba(0,0,0,0.2); }
+      .header-center.mobile-open { left: 0; }
+      .mobile-nav-header { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-bottom: 20px; }
+      .mobile-nav-header button { background: none; border: none; color: var(--text-main); }
+      .app-header { padding: 0 16px; }
+      .main-container { padding: 0 16px 4rem; }
+    }
+  `}</style>
+);
+
+function NewsListPage() {
   const [allNews, setAllNews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -273,7 +488,7 @@ function App() {
       const dateObj = new Date(rawDate);
       entries.push({
         title: normalizeText(title),
-        description: normalizeText(body).substring(0, 180),
+        description: normalizeText(body),
         url,
         image: FALLBACK_IMAGE,
         source,
@@ -292,7 +507,7 @@ function App() {
 
     return {
       title: normalizeText(item.title || ""),
-      description: normalizeText(item.description || "").substring(0, 180),
+      description: normalizeText(item.description || ""),
       url: item.link || item.url,
       image: item.enclosure?.link || item.thumbnail || FALLBACK_IMAGE,
       source: normalizeText(source),
@@ -315,7 +530,7 @@ function App() {
 
     return {
       title: normalizeText(item.querySelector("title")?.textContent || ""),
-      description: normalizeText(desc.replace(/<[^>]*>?/gm, '')).substring(0, 180),
+      description: normalizeText(desc.replace(/<[^>]*>?/gm, '')),
       url: item.querySelector("link")?.textContent || item.querySelector("link")?.getAttribute("href") || "#",
       image: img || FALLBACK_IMAGE,
       source: normalizeText(source),
@@ -587,13 +802,13 @@ function App() {
                   <div className="slider-track" style={{ transform: `translateX(-${currentSlide * 100}%)` }}>
                     {sliderHaberler.map((item, index) => (
                       <div key={item.id || index} className="slide">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="slide-link">
+                        <Link to={buildNewsRoute(item.id, item.title)} className="slide-link">
                           <img src={item.image} alt={item.title} className="slide-img" draggable="false" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
                           <div className="slide-content">
                             <div className="slide-meta"><span className="source-tag">{item.source}</span>{" "}<span className="time-tag">{formatPublishedDistance(item.publishedAt)}</span></div>
                             <h2 className="slide-title">{item.title}</h2>
                           </div>
-                        </a>
+                        </Link>
                       </div>
                     ))}
                   </div>
@@ -626,9 +841,9 @@ function App() {
                 {gridHaberler.map((item, idx) => (
                   <article key={item.id || idx} className="news-card">
                     <div className="card-media">
-                      <a href={item.url} target="_blank" rel="noopener noreferrer">
+                      <Link to={buildNewsRoute(item.id, item.title)}>
                         <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
-                      </a>
+                      </Link>
                       <span className="card-badge">{item.source}</span>
                     </div>
                     <div className="card-body">
@@ -639,7 +854,7 @@ function App() {
                       </div>
                       <h2 className="card-title">{item.title}</h2>
                       <div className="card-footer">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="btn-read">Habere Git <ExternalLink size={14} /></a>
+                        <Link to={buildNewsRoute(item.id, item.title)} className="btn-read">Haberi Ac <ExternalLink size={14} /></Link>
                       </div>
                     </div>
                   </article>
@@ -676,6 +891,40 @@ function App() {
         .nav-link { background: none; border: none; color: var(--text-secondary); font-weight: 700; cursor: pointer; transition: 0.3s; padding: 8px 12px; }
         .nav-link.active { color: var(--primary); }
         .mobile-menu-btn { display: none; background: none; border: none; color: var(--text-main); cursor: pointer; }
+        .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+        .icon-btn {
+          width: 44px;
+          height: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 999px;
+          border: 1px solid var(--border-color);
+          background: var(--card-bg);
+          color: var(--text-main);
+          cursor: pointer;
+          transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+          box-shadow: var(--shadow-sm);
+          padding: 0;
+        }
+        .icon-btn svg,
+        .scroll-to-top svg {
+          width: 20px;
+          height: 20px;
+          flex-shrink: 0;
+          display: block;
+        }
+        .icon-btn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(255, 59, 48, 0.24);
+          box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08);
+        }
+        .icon-btn:disabled {
+          opacity: 0.6;
+          cursor: default;
+          transform: none;
+          box-shadow: var(--shadow-sm);
+        }
 
         .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0 2rem; }
         .status-pill, .sort-label { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 900; background: var(--card-bg); padding: 10px 22px; border-radius: 40px; border: 1px solid var(--border-color); color: var(--text-secondary); box-shadow: var(--shadow-sm); }
@@ -722,7 +971,7 @@ function App() {
         [data-theme='dark'] .btn-more { color: #f5f5f7; border-color: rgba(255,255,255,0.14); background: linear-gradient(135deg, rgba(46,46,50,0.98), rgba(28,28,30,0.96)); box-shadow: 0 14px 30px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.05); }
         [data-theme='dark'] .btn-more:hover { border-color: rgba(255, 99, 88, 0.4); background: linear-gradient(135deg, rgba(56,56,60,1), rgba(34,34,36,1)); box-shadow: 0 18px 36px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.06); }
 
-        .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); }
+        .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); padding: 0; }
         .scroll-to-top.visible { opacity: 1; visibility: visible; }
 
         @media (max-width: 1024px) {
@@ -742,6 +991,208 @@ function App() {
         }
       `}</style>
     </div>
+  );
+}
+
+function NewsDetailPage() {
+  const { newsId } = useParams();
+  const navigate = useNavigate();
+  const [newsItem, setNewsItem] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [darkMode, setDarkMode] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [detailBody, setDetailBody] = useState("");
+  const [detailLoading, setDetailLoading] = useState(false);
+  const detailParagraphs = buildDetailParagraphs(detailBody || newsItem?.description);
+  const resolvedNewsId = extractNewsIdFromRouteParam(newsId);
+
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark') {
+      setDarkMode(true);
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+
+    const handleScroll = () => setShowScrollTop(window.scrollY > 400);
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    const loadNewsItem = async () => {
+      const decodedNewsId = resolvedNewsId;
+
+      if (!decodedNewsId) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const newsDoc = await getDoc(doc(db, 'news', decodedNewsId));
+        if (newsDoc.exists()) {
+          setNewsItem(normalizeNewsItem({ id: newsDoc.id, ...newsDoc.data() }));
+        } else {
+          setNewsItem(null);
+        }
+      } catch {
+        setNewsItem(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void loadNewsItem();
+  }, [resolvedNewsId]);
+
+  useEffect(() => {
+    if (!newsItem) {
+      setDetailBody("");
+      setDetailLoading(false);
+      return;
+    }
+
+    const baseDescription = normalizeText(newsItem.description || "");
+    setDetailBody(baseDescription);
+
+    if (baseDescription.length >= DETAIL_FALLBACK_MIN_CHARS || !newsItem.url) {
+      setDetailLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setDetailLoading(true);
+
+    void fetchArticleFallbackText(newsItem.url, newsItem.title)
+      .then((fallbackText) => {
+        if (cancelled) return;
+        if (fallbackText && fallbackText.length > baseDescription.length) {
+          setDetailBody(fallbackText);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDetailLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [newsItem]);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', background: darkMode ? "#000" : "#f8f9fa", color: darkMode ? "#f5f5f7" : "#1d1d1f" }}>
+        Haber hazirlaniyor...
+      </div>
+    );
+  }
+
+  if (!newsItem) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', padding: "2rem", background: darkMode ? "#000" : "#f8f9fa", color: darkMode ? "#f5f5f7" : "#1d1d1f" }}>
+        <div style={{ maxWidth: 680, textAlign: "center" }}>
+          <h1 style={{ marginBottom: "1rem" }}>Haber bulunamadi</h1>
+          <button onClick={() => navigate("/")} style={{ border: "none", background: "#ff3b30", color: "#fff", padding: "12px 20px", borderRadius: 12, cursor: "pointer", fontWeight: 700 }}>
+            Listeye don
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <DetailPageChromeStyles />
+      <header className="app-header">
+        <div className="header-left">
+          <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu /></button>
+          <button onClick={() => navigate("/")} style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", color: "#ff3b30", cursor: "pointer", fontWeight: 800, fontSize: "1.5rem" }}><Flame size={28} /><span>Bilgin Haber</span></button>
+        </div>
+        <nav className={`header-center ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+          {isMobileMenuOpen && <div className="mobile-nav-header"><Flame size={24} /><span>Kategoriler</span><button onClick={() => setIsMobileMenuOpen(false)}><X /></button></div>}
+          {CATEGORIES.map((cat) => (
+            <button key={cat} className={`nav-link ${cat === "Tümü" ? 'active' : ''}`} onClick={() => navigate("/")}>{cat}</button>
+          ))}
+        </nav>
+        <div className="header-right">
+          <button className="icon-btn" onClick={() => navigate("/")} title="Listeye Don"><ArrowUp style={{ transform: "rotate(-90deg)" }} size={20} /></button>
+          <button className="icon-btn" onClick={() => {
+            const mode = !darkMode;
+            setDarkMode(mode);
+            document.documentElement.setAttribute('data-theme', mode ? 'dark' : 'light');
+            localStorage.setItem('theme', mode ? 'dark' : 'light');
+          }} title="Tema Değiştir">{darkMode ? <Sun /> : <Moon />}</button>
+        </div>
+      </header>
+      <main className="main-container">
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2.2fr) minmax(280px, 0.9fr)", gap: 28, paddingTop: "1.75rem" }}>
+          <article style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 18 }}>
+              <span className="status-pill">{newsItem.source}</span>
+              <span className="status-pill">{newsItem.category}</span>
+              <span className="status-pill">{formatPublishedDistance(newsItem.publishedAt)}</span>
+            </div>
+            <h1 style={{ fontSize: "clamp(2rem, 4vw, 3.6rem)", lineHeight: 1.06, margin: "0 0 18px", maxWidth: 900 }}>{newsItem.title}</h1>
+            <p style={{ fontSize: "1.1rem", lineHeight: 1.75, color: darkMode ? "#d0d0d4" : "#3a3a3c", margin: "0 0 24px", maxWidth: 860 }}>
+              {detailParagraphs[0] || "Bu haber icin uygulama icinde okunabilir ozet bulunamadi. Ayrintilar icin orijinal kaynaga gec."}
+            </p>
+            <img src={newsItem.image || FALLBACK_IMAGE} alt={newsItem.title} style={{ width: "100%", height: "min(52vw, 520px)", objectFit: "cover", borderRadius: 24, marginBottom: 24, border: `1px solid ${darkMode ? "#2f2f34" : "#e5e5e5"}` }} onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
+            <div style={{ background: darkMode ? "#121214" : "#fff", border: `1px solid ${darkMode ? "#2f2f34" : "#e5e5e5"}`, borderRadius: 24, padding: "24px 24px 28px", boxShadow: darkMode ? "0 14px 30px rgba(0,0,0,0.25)" : "0 12px 30px rgba(17,24,39,0.08)" }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: "1.1rem" }}>Genel Detay</h2>
+              <div style={{ display: "grid", gap: 16 }}>
+                {detailParagraphs.length > 0 ? detailParagraphs.map((paragraph, index) => (
+                  <p key={`${newsItem.id || newsItem.url}-${index}`} style={{ margin: 0, lineHeight: 1.9, color: darkMode ? "#d0d0d4" : "#3a3a3c", fontSize: "1.02rem" }}>
+                    {paragraph}
+                  </p>
+                )) : (
+                  <p style={{ margin: 0, lineHeight: 1.85, color: darkMode ? "#d0d0d4" : "#3a3a3c" }}>
+                    Bu haber icin ozet bilgisi yok.
+                  </p>
+                )}
+                {detailLoading && (
+                  <p style={{ margin: 0, lineHeight: 1.8, color: darkMode ? "#8e8e93" : "#6e6e73", fontSize: "0.95rem" }}>
+                    Kaynaktan daha fazla icerik aliniyor...
+                  </p>
+                )}
+                <p style={{ margin: 0, lineHeight: 1.85, color: darkMode ? "#8e8e93" : "#6e6e73", fontSize: "0.98rem" }}>
+                  Burada haberin ana akisini okuyabilirsin. Tam metin, ek detaylar ve kaynak icindeki baglamsal bilgi icin alttaki baglanti ile orijinal habere gecebilirsin.
+                </p>
+              </div>
+            </div>
+          </article>
+          <aside style={{ alignSelf: "start", position: "sticky", top: 96 }}>
+            <div style={{ background: darkMode ? "#121214" : "#fff", border: `1px solid ${darkMode ? "#2f2f34" : "#e5e5e5"}`, borderRadius: 24, padding: 22, boxShadow: darkMode ? "0 14px 30px rgba(0,0,0,0.25)" : "0 12px 30px rgba(17,24,39,0.08)" }}>
+              <div style={{ display: "grid", gap: 12 }}>
+                <button onClick={() => navigate("/")} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: darkMode ? "#1c1c1e" : "#fff", color: darkMode ? "#f5f5f7" : "#1d1d1f", padding: "12px 18px", borderRadius: 14, fontWeight: 800, border: `1px solid ${darkMode ? "#38383a" : "#e5e5e5"}`, cursor: "pointer" }}>
+                  Listeye Don
+                </button>
+                <a href={newsItem.url} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#ff3b30", color: "#fff", padding: "12px 18px", borderRadius: 14, fontWeight: 800, textDecoration: "none" }}>
+                  Kaynaga Git <ExternalLink size={16} />
+                </a>
+              </div>
+              <div style={{ marginTop: 18, paddingTop: 18, borderTop: `1px solid ${darkMode ? "#2f2f34" : "#e5e5e5"}` }}>
+                <div style={{ fontSize: "0.8rem", fontWeight: 900, color: darkMode ? "#8e8e93" : "#86868b", marginBottom: 10 }}>Paylasim Linki</div>
+                <div style={{ fontSize: "0.86rem", lineHeight: 1.6, color: darkMode ? "#d0d0d4" : "#3a3a3c", wordBreak: "break-all" }}>{window.location.href}</div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+      <button className={`scroll-to-top ${showScrollTop ? 'visible' : ''}`} onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={24} /></button>
+      <footer className="app-footer"><div className="footer-content"><Flame size={20} /> <span>{'Bilgin Haber \u00a9 2026 - T\u00fcm Haklar\u0131 Sakl\u0131d\u0131r'}</span></div></footer>
+    </div>
+  );
+}
+function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<NewsListPage />} />
+      <Route path="/haber/:newsId" element={<NewsDetailPage />} />
+    </Routes>
   );
 }
 
