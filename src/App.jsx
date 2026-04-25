@@ -21,7 +21,6 @@ const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const STALE_SYNC_MS = 15 * 60 * 1000;
 const FIRESTORE_QUERY_LIMIT = 1500;
 const MAX_ITEMS_PER_SOURCE = 40;
-const DETAIL_FALLBACK_MIN_CHARS = 260;
 const RSS_SOURCES = [
   { name: "Haberturk", url: "https://www.haberturk.com/rss/manset.xml" },
   { name: "Hurriyet", url: "https://www.hurriyet.com.tr/rss/anasayfa" },
@@ -48,7 +47,6 @@ const createDefaultCookieConsent = () => ({
   status: "pending",
   necessary: true,
   preferences: false,
-  performance: false,
   updatedAt: null,
 });
 
@@ -164,7 +162,6 @@ const persistCookieConsentToDb = async (consent, route) => {
       categories: {
         necessary: true,
         preferences: Boolean(consent.preferences),
-        performance: Boolean(consent.performance),
       },
       route,
       updatedAt: serverTimestamp(),
@@ -417,118 +414,6 @@ const buildDetailParagraphs = (description = "") => {
   return paragraphs.filter(Boolean);
 };
 
-const stripMarkdownDecorations = (line = "") =>
-  normalizeText(
-    String(line)
-      .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-      .replace(/^#{1,6}\s+/, "")
-      .replace(/^\*\s+/, "")
-  );
-
-const extractHaberlerArticleText = (markdown = "", title = "") => {
-  const normalizedTitle = normalizeText(title).toLowerCase();
-  const lines = String(markdown).split(/\r?\n/);
-  const startIndex = lines.findIndex((line) => stripMarkdownDecorations(line).toLowerCase() === normalizedTitle);
-
-  if (startIndex === -1) return "";
-
-  const paragraphs = [];
-  let contentStarted = false;
-
-  for (let index = startIndex + 1; index < lines.length; index += 1) {
-    const rawLine = lines[index];
-    const line = stripMarkdownDecorations(rawLine);
-    if (!line) continue;
-
-    if (/^(Kaynak:|Yorumunuzu Yazin|BIZI TAKIP EDIN|UYGULAMAMIZI INDIRIN|© Copyright|Haberler\.com:)/i.test(line)) break;
-    if (/^\d{2}\.\d{2}\.\d{4}/.test(line)) continue;
-    if (/^(Güncelleme|Guncelleme):/i.test(line)) continue;
-    if (/^(Facebook'da|Twitter'da|WhatsApp'da|Google News'de) Paylas/i.test(line)) continue;
-    if (/^(Anasayfa|Spor|Son Dakika|Maç Sonuçlari|Puan Durumu|Futbol|Besiktas|Fenerbahçe|Galatasaray|Espor)$/i.test(line)) continue;
-    if (/^\d+\.\s+/.test(line)) continue;
-    if (/^Image \d+:/i.test(line)) continue;
-    if (/^Ara$/i.test(line)) continue;
-    if (/^ÜYE GIRISI$/i.test(line)) continue;
-    if (line.length < 40 && !/^[A-ZÇĞİÖŞÜ0-9\s'".,:-]+$/i.test(line)) continue;
-
-    if (!contentStarted && !/^(##|###)/.test(rawLine) && line.length < 80) {
-      continue;
-    }
-
-    contentStarted = true;
-    paragraphs.push(line);
-  }
-
-  return normalizeText(paragraphs.join("\n\n"));
-};
-
-const extractArticleTextFromMarkdown = (markdown = "", title = "", url = "") => {
-  if (/haberler\.com/i.test(url)) {
-    const sourceSpecific = extractHaberlerArticleText(markdown, title);
-    if (sourceSpecific) return sourceSpecific;
-  }
-
-  const normalizedTitle = normalizeText(title);
-  const lines = String(markdown)
-    .split(/\r?\n/)
-    .map((line) => stripMarkdownDecorations(line))
-    .filter(Boolean);
-
-  const paragraphs = [];
-  let totalLength = 0;
-
-  for (const line of lines) {
-    if (!line) continue;
-    if (normalizedTitle && line === normalizedTitle) continue;
-    if (/^(Title:|URL Source:|Published Time:|Markdown Content:)/i.test(line)) continue;
-    if (/^https?:\/\//i.test(line)) continue;
-    if (line.startsWith("![") || line.startsWith("[")) continue;
-    if (/^(Anasayfa|Son Dakika|Guncel|Güncel|Ekonomi|Magazin|Spor|Kripto|Dünya|Dunya|Sağlık|Saglik)$/i.test(line)) continue;
-    if (line.length < 55 && !/[.!?]/.test(line)) continue;
-    if (paragraphs.includes(line)) continue;
-
-    paragraphs.push(line);
-    totalLength += line.length;
-    if (totalLength >= 8000) break;
-  }
-
-  return normalizeText(paragraphs.join("\n\n"));
-};
-
-const fetchArticleFallbackText = async (url, title = "") => {
-  if (!url) return "";
-
-  const cacheKey = `article-fallback:${url}`;
-  if (canUseCookieCategory("performance")) {
-    try {
-      const cached = sessionStorage.getItem(cacheKey);
-      if (cached) return cached;
-    } catch {
-      // ignore sessionStorage access issues
-    }
-  }
-
-  try {
-    const fallbackUrl = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
-    const res = await fetch(fallbackUrl, { signal: AbortSignal.timeout(12000) });
-    if (!res.ok) return "";
-
-    const markdown = await res.text();
-    const extracted = extractArticleTextFromMarkdown(markdown, title, url);
-    if (extracted && canUseCookieCategory("performance")) {
-      try {
-        sessionStorage.setItem(cacheKey, extracted);
-      } catch {
-        // ignore sessionStorage quota/access issues
-      }
-    }
-    return extracted;
-  } catch {
-    return "";
-  }
-};
-
 const DetailPageChromeStyles = () => (
   <style>{`
     :root {
@@ -559,6 +444,8 @@ const DetailPageChromeStyles = () => (
     .icon-btn:hover { transform: translateY(-1px); border-color: rgba(255, 59, 48, 0.24); box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08); }
     .status-pill { display: inline-flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 900; background: var(--card-bg); padding: 10px 22px; border-radius: 40px; border: 1px solid var(--border-color); color: var(--text-secondary); box-shadow: var(--shadow-sm); }
     .main-container { max-width: 1400px; margin: 0 auto; padding: 0 5% 5rem; }
+    .detail-layout { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(280px, 0.9fr); gap: 28px; padding-top: 1.75rem; }
+    .detail-sidebar { align-self: start; position: sticky; top: 96px; }
     .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); padding: 0; }
     .scroll-to-top.visible { opacity: 1; visibility: visible; }
     .app-footer { padding: 2rem 5%; border-top: 1px solid var(--border-color); color: var(--text-secondary); }
@@ -571,6 +458,9 @@ const DetailPageChromeStyles = () => (
       .mobile-nav-header button { background: none; border: none; color: var(--text-main); }
       .app-header { padding: 0 16px; }
       .main-container { padding: 0 16px 4rem; }
+      .detail-layout { grid-template-columns: 1fr; gap: 20px; }
+      .detail-sidebar { position: static; top: auto; }
+      .scroll-to-top { right: 20px; bottom: 20px; width: 56px; height: 56px; }
     }
   `}</style>
 );
@@ -1140,9 +1030,7 @@ function NewsDetailPage() {
   const [darkMode, setDarkMode] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
-  const [detailBody, setDetailBody] = useState("");
-  const [detailLoading, setDetailLoading] = useState(false);
-  const detailParagraphs = buildDetailParagraphs(detailBody || newsItem?.description);
+  const detailParagraphs = buildDetailParagraphs(newsItem?.description);
   const resolvedNewsId = extractNewsIdFromRouteParam(newsId);
 
   useEffect(() => {
@@ -1184,43 +1072,6 @@ function NewsDetailPage() {
 
     void loadNewsItem();
   }, [resolvedNewsId]);
-
-  useEffect(() => {
-    if (!newsItem) {
-      setDetailBody("");
-      setDetailLoading(false);
-      return;
-    }
-
-    const baseDescription = normalizeText(newsItem.description || "");
-    setDetailBody(baseDescription);
-
-    if (baseDescription.length >= DETAIL_FALLBACK_MIN_CHARS || !newsItem.url) {
-      setDetailLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setDetailLoading(true);
-
-    void fetchArticleFallbackText(newsItem.url, newsItem.title)
-      .then((fallbackText) => {
-        if (cancelled) return;
-        if (fallbackText && fallbackText.length > baseDescription.length) {
-          setDetailBody(fallbackText);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setDetailLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [newsItem]);
-
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', background: darkMode ? "#000" : "#f8f9fa", color: darkMode ? "#f5f5f7" : "#1d1d1f" }}>
@@ -1267,7 +1118,7 @@ function NewsDetailPage() {
         </div>
       </header>
       <main className="main-container">
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2.2fr) minmax(280px, 0.9fr)", gap: 28, paddingTop: "1.75rem" }}>
+        <div className="detail-layout">
           <article style={{ minWidth: 0 }}>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 18 }}>
               <span className="status-pill">{newsItem.source}</span>
@@ -1291,18 +1142,13 @@ function NewsDetailPage() {
                     Bu haber icin ozet bilgisi yok.
                   </p>
                 )}
-                {detailLoading && (
-                  <p style={{ margin: 0, lineHeight: 1.8, color: darkMode ? "#8e8e93" : "#6e6e73", fontSize: "0.95rem" }}>
-                    Kaynaktan daha fazla icerik aliniyor...
-                  </p>
-                )}
                 <p style={{ margin: 0, lineHeight: 1.85, color: darkMode ? "#8e8e93" : "#6e6e73", fontSize: "0.98rem" }}>
-                  Burada haberin ana akisini okuyabilirsin. Tam metin, ek detaylar ve kaynak icindeki baglamsal bilgi icin alttaki baglanti ile orijinal habere gecebilirsin.
+                  Burada kaynagin RSS akisinda paylastigi ozet yer alir. Tam metin ve ek baglamsal bilgi icin alttaki baglanti ile orijinal habere gecebilirsin.
                 </p>
               </div>
             </div>
           </article>
-          <aside style={{ alignSelf: "start", position: "sticky", top: 96 }}>
+          <aside className="detail-sidebar">
             <div style={{ background: darkMode ? "#121214" : "#fff", border: `1px solid ${darkMode ? "#2f2f34" : "#e5e5e5"}`, borderRadius: 24, padding: 22, boxShadow: darkMode ? "0 14px 30px rgba(0,0,0,0.25)" : "0 12px 30px rgba(17,24,39,0.08)" }}>
               <div style={{ display: "grid", gap: 12 }}>
                 <button onClick={() => navigate("/")} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: darkMode ? "#1c1c1e" : "#fff", color: darkMode ? "#f5f5f7" : "#1d1d1f", padding: "12px 18px", borderRadius: 14, fontWeight: 800, border: `1px solid ${darkMode ? "#38383a" : "#e5e5e5"}`, cursor: "pointer" }}>
@@ -1333,7 +1179,7 @@ const CookieConsentBanner = ({ onAcceptAll, onRejectAll, onOpenSettings, onOpenN
         <div style={{ display: "grid", gap: 8 }}>
           <strong style={{ fontSize: "1rem" }}>Cerez Tercihleri</strong>
           <p style={{ margin: 0, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-            Sitemizin calismasi icin zorunlu cerezleri kullanıyoruz. Tercih ve performans cerezleri ise ancak onay vermeniz halinde aktif olur.
+            Sitemizin calismasi icin zorunlu cerezleri kullanıyoruz. Tercih cerezleri ise ancak onay vermeniz halinde aktif olur.
           </p>
           <button onClick={onOpenNotice} style={{ padding: 0, border: "none", background: "none", color: "#ff3b30", fontWeight: 700, textAlign: "left", cursor: "pointer" }}>
             Cerez Aydinlatma Metni
@@ -1367,6 +1213,9 @@ const CookieConsentModal = ({ draftConsent, onChange, onClose, onSave, onRejectA
           <p style={{ margin: 0, lineHeight: 1.7, color: "var(--text-secondary)" }}>
             Bu panel, Bilgin Haber uygulamasinda kullanilan cerez ve benzeri tarayici depolama teknolojileri icin hazirlanmistir. Acik riza gerektiren kategoriler varsayilan olarak kapali gelir.
           </p>
+          <p style={{ margin: 0, lineHeight: 1.7, color: "var(--text-secondary)" }}>
+            Bilgin Haber, kamuya acik RSS akislarinda yer alan baslik, ozet ve baglantilari kaynak gostererek iletir. Detay sayfasinda yalnizca kaynagin RSS akisinda sagladigi ozet kullanilir. Tam metin, gorsel ve diger icerik haklari ilgili yayinciya aittir.
+          </p>
         </section>
         <section style={{ display: "grid", gap: 10 }}>
           <strong>Kullandigimiz kategoriler</strong>
@@ -1386,13 +1235,6 @@ const CookieConsentModal = ({ draftConsent, onChange, onClose, onSave, onRejectA
                 <div style={{ color: "var(--text-secondary)", lineHeight: 1.6, marginTop: 4 }}>Tema seciminizin tekrar geldiginizde hatirlanmasini saglar. Hukuki dayanak acik rizanizdir.</div>
               </div>
               <input type="checkbox" checked={draftConsent.preferences} disabled={noticeOnly} onChange={(event) => onChange("preferences", event.target.checked)} />
-            </label>
-            <label style={{ padding: 16, borderRadius: 16, border: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", cursor: noticeOnly ? "default" : "pointer" }}>
-              <div>
-                <div style={{ fontWeight: 800 }}>Performans Cerezleri</div>
-                <div style={{ color: "var(--text-secondary)", lineHeight: 1.6, marginTop: 4 }}>Detay sayfasinda ayni haber icin alinan ek icerigin gecici olarak saklanmasini saglar. Hukuki dayanak acik rizanizdir.</div>
-              </div>
-              <input type="checkbox" checked={draftConsent.performance} disabled={noticeOnly} onChange={(event) => onChange("performance", event.target.checked)} />
             </label>
           </div>
         </section>
@@ -1459,7 +1301,7 @@ function App() {
     writeCookieConsent(finalConsent);
     clearOptionalCookieStorage({
       clearPreferences: !finalConsent.preferences,
-      clearPerformance: !finalConsent.performance,
+      clearPerformance: true,
     });
 
     setCookieConsent(finalConsent);
@@ -1475,7 +1317,6 @@ function App() {
     void applyCookieConsent({
       status: "accepted",
       preferences: true,
-      performance: true,
     });
   }, [applyCookieConsent]);
 
@@ -1483,7 +1324,6 @@ function App() {
     void applyCookieConsent({
       status: "rejected",
       preferences: false,
-      performance: false,
     });
   }, [applyCookieConsent]);
 
@@ -1491,9 +1331,8 @@ function App() {
     void applyCookieConsent({
       status: "customized",
       preferences: Boolean(draftConsent.preferences),
-      performance: Boolean(draftConsent.performance),
     });
-  }, [applyCookieConsent, draftConsent.performance, draftConsent.preferences]);
+  }, [applyCookieConsent, draftConsent.preferences]);
 
   return (
     <>
