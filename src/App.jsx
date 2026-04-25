@@ -4,7 +4,7 @@ import { db } from './firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, getDocs, setDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { formatDistanceToNow } from 'date-fns';
 import { tr } from 'date-fns/locale';
-import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 
 const CATEGORIES = [
   "T\u00fcm\u00fc",
@@ -38,6 +38,142 @@ const PROXIES = [
   { name: "AllOrigins", fn: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
   { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
 ];
+const COOKIE_CONSENT_VERSION = "2026-04-25";
+const COOKIE_CONSENT_STORAGE_KEY = "bilgin-cookie-consent";
+const COOKIE_CONSENT_ID_STORAGE_KEY = "bilgin-cookie-consent-id";
+const THEME_STORAGE_KEY = "theme";
+
+const createDefaultCookieConsent = () => ({
+  version: COOKIE_CONSENT_VERSION,
+  status: "pending",
+  necessary: true,
+  preferences: false,
+  performance: false,
+  updatedAt: null,
+});
+
+const readCookieConsent = () => {
+  if (typeof window === "undefined") return createDefaultCookieConsent();
+
+  try {
+    const rawValue = window.localStorage.getItem(COOKIE_CONSENT_STORAGE_KEY);
+    if (!rawValue) return createDefaultCookieConsent();
+
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || parsed.version !== COOKIE_CONSENT_VERSION) {
+      return createDefaultCookieConsent();
+    }
+
+    return {
+      ...createDefaultCookieConsent(),
+      ...parsed,
+      necessary: true,
+    };
+  } catch {
+    return createDefaultCookieConsent();
+  }
+};
+
+const writeCookieConsent = (consent) => {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(COOKIE_CONSENT_STORAGE_KEY, JSON.stringify(consent));
+  } catch {
+    // ignore storage access issues
+  }
+};
+
+const getCookieConsentId = () => {
+  if (typeof window === "undefined") return "server";
+
+  try {
+    const existing = window.localStorage.getItem(COOKIE_CONSENT_ID_STORAGE_KEY);
+    if (existing) return existing;
+
+    const nextId = window.crypto?.randomUUID?.() || `consent-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    window.localStorage.setItem(COOKIE_CONSENT_ID_STORAGE_KEY, nextId);
+    return nextId;
+  } catch {
+    return `consent-${Date.now()}`;
+  }
+};
+
+const canUseCookieCategory = (category) => {
+  if (category === "necessary") return true;
+  const consent = readCookieConsent();
+  return Boolean(consent?.[category]);
+};
+
+const readThemePreference = () => {
+  if (typeof window === "undefined" || !canUseCookieCategory("preferences")) return null;
+
+  try {
+    return window.localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+};
+
+const writeThemePreference = (themeValue) => {
+  if (typeof window === "undefined" || !canUseCookieCategory("preferences")) return;
+
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeValue);
+  } catch {
+    // ignore storage access issues
+  }
+};
+
+const clearOptionalCookieStorage = ({ clearPreferences = false, clearPerformance = false } = {}) => {
+  if (typeof window === "undefined") return;
+
+  if (clearPreferences) {
+    try {
+      window.localStorage.removeItem(THEME_STORAGE_KEY);
+    } catch {
+      // ignore localStorage access issues
+    }
+  }
+
+  if (clearPerformance) {
+    try {
+      const keysToRemove = [];
+      for (let index = 0; index < window.sessionStorage.length; index += 1) {
+        const key = window.sessionStorage.key(index);
+        if (key?.startsWith("article-fallback:")) {
+          keysToRemove.push(key);
+        }
+      }
+
+      keysToRemove.forEach((key) => window.sessionStorage.removeItem(key));
+    } catch {
+      // ignore sessionStorage access issues
+    }
+  }
+};
+
+const persistCookieConsentToDb = async (consent, route) => {
+  try {
+    const consentId = getCookieConsentId();
+    await setDoc(doc(db, "cookieConsents", consentId), {
+      consentId,
+      source: "web",
+      policyVersion: consent.version,
+      status: consent.status,
+      categories: {
+        necessary: true,
+        preferences: Boolean(consent.preferences),
+        performance: Boolean(consent.performance),
+      },
+      route,
+      updatedAt: serverTimestamp(),
+      updatedAtClient: new Date().toISOString(),
+    }, { merge: true });
+  } catch {
+    // consent banner should keep working even if audit write fails
+  }
+};
 
 const decodeHtmlEntities = (value = "") => {
   if (!value || typeof document === "undefined") return value || "";
@@ -364,11 +500,13 @@ const fetchArticleFallbackText = async (url, title = "") => {
   if (!url) return "";
 
   const cacheKey = `article-fallback:${url}`;
-  try {
-    const cached = sessionStorage.getItem(cacheKey);
-    if (cached) return cached;
-  } catch {
-    // ignore sessionStorage access issues
+  if (canUseCookieCategory("performance")) {
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) return cached;
+    } catch {
+      // ignore sessionStorage access issues
+    }
   }
 
   try {
@@ -378,7 +516,7 @@ const fetchArticleFallbackText = async (url, title = "") => {
 
     const markdown = await res.text();
     const extracted = extractArticleTextFromMarkdown(markdown, title, url);
-    if (extracted) {
+    if (extracted && canUseCookieCategory("performance")) {
       try {
         sessionStorage.setItem(cacheKey, extracted);
       } catch {
@@ -710,7 +848,7 @@ function NewsListPage() {
     window.addEventListener('resize', handleResize);
     window.addEventListener('scroll', handleScroll);
 
-    const savedTheme = localStorage.getItem('theme');
+    const savedTheme = readThemePreference();
     if (savedTheme === 'dark') {
       setDarkMode(true);
       document.documentElement.setAttribute('data-theme', 'dark');
@@ -778,7 +916,7 @@ function NewsListPage() {
             const mode = !darkMode;
             setDarkMode(mode);
             document.documentElement.setAttribute('data-theme', mode ? 'dark' : 'light');
-            localStorage.setItem('theme', mode ? 'dark' : 'light');
+            writeThemePreference(mode ? 'dark' : 'light');
           }} title="Tema De\u011fi\u015ftir">{darkMode ? <Sun /> : <Moon />}</button>
         </div>
       </header>
@@ -1008,7 +1146,7 @@ function NewsDetailPage() {
   const resolvedNewsId = extractNewsIdFromRouteParam(newsId);
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem('theme');
+    const savedTheme = readThemePreference();
     if (savedTheme === 'dark') {
       setDarkMode(true);
       document.documentElement.setAttribute('data-theme', 'dark');
@@ -1124,7 +1262,7 @@ function NewsDetailPage() {
             const mode = !darkMode;
             setDarkMode(mode);
             document.documentElement.setAttribute('data-theme', mode ? 'dark' : 'light');
-            localStorage.setItem('theme', mode ? 'dark' : 'light');
+            writeThemePreference(mode ? 'dark' : 'light');
           }} title="Tema Değiştir">{darkMode ? <Sun /> : <Moon />}</button>
         </div>
       </header>
@@ -1187,12 +1325,225 @@ function NewsDetailPage() {
     </div>
   );
 }
+
+const CookieConsentBanner = ({ onAcceptAll, onRejectAll, onOpenSettings, onOpenNotice }) => (
+  <div style={{ position: "fixed", left: 24, right: 24, bottom: 24, zIndex: 4000, display: "flex", justifyContent: "center", pointerEvents: "none" }}>
+    <div style={{ width: "min(980px, 100%)", background: "var(--card-bg)", color: "var(--text-main)", border: "1px solid var(--border-color)", borderRadius: 20, boxShadow: "0 24px 60px rgba(0,0,0,0.18)", padding: 20, pointerEvents: "auto" }}>
+      <div style={{ display: "grid", gap: 14 }}>
+        <div style={{ display: "grid", gap: 8 }}>
+          <strong style={{ fontSize: "1rem" }}>Cerez Tercihleri</strong>
+          <p style={{ margin: 0, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            Sitemizin calismasi icin zorunlu cerezleri kullanıyoruz. Tercih ve performans cerezleri ise ancak onay vermeniz halinde aktif olur.
+          </p>
+          <button onClick={onOpenNotice} style={{ padding: 0, border: "none", background: "none", color: "#ff3b30", fontWeight: 700, textAlign: "left", cursor: "pointer" }}>
+            Cerez Aydinlatma Metni
+          </button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+          <button onClick={onAcceptAll} style={{ minHeight: 46, borderRadius: 14, border: "1px solid #ff3b30", background: "#ff3b30", color: "#fff", fontWeight: 800, cursor: "pointer" }}>Hepsini Kabul Et</button>
+          <button onClick={onRejectAll} style={{ minHeight: 46, borderRadius: 14, border: "1px solid var(--border-color)", background: "var(--card-bg)", color: "var(--text-main)", fontWeight: 800, cursor: "pointer" }}>Hepsini Reddet</button>
+          <button onClick={onOpenSettings} style={{ minHeight: 46, borderRadius: 14, border: "1px solid var(--border-color)", background: "var(--card-bg)", color: "var(--text-main)", fontWeight: 800, cursor: "pointer" }}>Tercihleri Yonet</button>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const CookieConsentModal = ({ draftConsent, onChange, onClose, onSave, onRejectAll, noticeOnly = false }) => (
+  <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 4100, display: "grid", placeItems: "center", padding: 20 }}>
+    <div style={{ width: "min(860px, 100%)", maxHeight: "85vh", overflowY: "auto", background: "var(--card-bg)", color: "var(--text-main)", borderRadius: 22, border: "1px solid var(--border-color)", boxShadow: "0 24px 60px rgba(0,0,0,0.22)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "20px 22px", borderBottom: "1px solid var(--border-color)" }}>
+        <div>
+          <strong style={{ display: "block", fontSize: "1.05rem" }}>Cerez Aydinlatma Metni</strong>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.92rem" }}>KVKK kapsaminda aydinlatma ve acik riza tercihi</span>
+        </div>
+        <button onClick={onClose} style={{ width: 40, height: 40, borderRadius: 999, border: "1px solid var(--border-color)", background: "var(--card-bg)", color: "var(--text-main)", cursor: "pointer" }}>
+          <X size={18} />
+        </button>
+      </div>
+      <div style={{ padding: 22, display: "grid", gap: 22 }}>
+        <section style={{ display: "grid", gap: 10 }}>
+          <strong>Veri sorumlusu ve kapsam</strong>
+          <p style={{ margin: 0, lineHeight: 1.7, color: "var(--text-secondary)" }}>
+            Bu panel, Bilgin Haber uygulamasinda kullanilan cerez ve benzeri tarayici depolama teknolojileri icin hazirlanmistir. Acik riza gerektiren kategoriler varsayilan olarak kapali gelir.
+          </p>
+        </section>
+        <section style={{ display: "grid", gap: 10 }}>
+          <strong>Kullandigimiz kategoriler</strong>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ padding: 16, borderRadius: 16, border: "1px solid var(--border-color)", background: "rgba(255,59,48,0.04)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <div>
+                  <div style={{ fontWeight: 800 }}>Zorunlu Cerezler</div>
+                  <div style={{ color: "var(--text-secondary)", lineHeight: 1.6, marginTop: 4 }}>Cerez tercihlerinizi hatirlamak ve izin panelinin calismasini saglamak icin kullanilir. Her zaman aktiftir.</div>
+                </div>
+                <span style={{ fontWeight: 800, color: "#ff3b30" }}>Her zaman acik</span>
+              </div>
+            </div>
+            <label style={{ padding: 16, borderRadius: 16, border: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", cursor: noticeOnly ? "default" : "pointer" }}>
+              <div>
+                <div style={{ fontWeight: 800 }}>Tercih Cerezleri</div>
+                <div style={{ color: "var(--text-secondary)", lineHeight: 1.6, marginTop: 4 }}>Tema seciminizin tekrar geldiginizde hatirlanmasini saglar. Hukuki dayanak acik rizanizdir.</div>
+              </div>
+              <input type="checkbox" checked={draftConsent.preferences} disabled={noticeOnly} onChange={(event) => onChange("preferences", event.target.checked)} />
+            </label>
+            <label style={{ padding: 16, borderRadius: 16, border: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", cursor: noticeOnly ? "default" : "pointer" }}>
+              <div>
+                <div style={{ fontWeight: 800 }}>Performans Cerezleri</div>
+                <div style={{ color: "var(--text-secondary)", lineHeight: 1.6, marginTop: 4 }}>Detay sayfasinda ayni haber icin alinan ek icerigin gecici olarak saklanmasini saglar. Hukuki dayanak acik rizanizdir.</div>
+              </div>
+              <input type="checkbox" checked={draftConsent.performance} disabled={noticeOnly} onChange={(event) => onChange("performance", event.target.checked)} />
+            </label>
+          </div>
+        </section>
+        <section style={{ display: "grid", gap: 10 }}>
+          <strong>Saklama ve haklariniz</strong>
+          <p style={{ margin: 0, lineHeight: 1.7, color: "var(--text-secondary)" }}>
+            Zorunlu tercih kaydi tarayicinizda tutulur. Acik riza karariniz ayrica ispat ve denetim amaciyla Firestore uzerinde anonim bir izin kaydi olarak saklanir. Tercihlerinizi istediginiz an yeniden degistirebilirsiniz.
+          </p>
+        </section>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 12, padding: "18px 22px", borderTop: "1px solid var(--border-color)" }}>
+        <button onClick={onRejectAll} style={{ minHeight: 44, padding: "0 18px", borderRadius: 14, border: "1px solid var(--border-color)", background: "var(--card-bg)", color: "var(--text-main)", fontWeight: 800, cursor: "pointer" }}>
+          Hepsini Reddet
+        </button>
+        {!noticeOnly && (
+          <button onClick={onSave} style={{ minHeight: 44, padding: "0 18px", borderRadius: 14, border: "1px solid #ff3b30", background: "#ff3b30", color: "#fff", fontWeight: 800, cursor: "pointer" }}>
+            Tercihleri Kaydet
+          </button>
+        )}
+      </div>
+    </div>
+  </div>
+);
+
+const CookiePreferencesLink = ({ onOpen }) => (
+  <button
+    onClick={onOpen}
+    style={{
+      position: "fixed",
+      left: 16,
+      bottom: 16,
+      zIndex: 3900,
+      border: "1px solid var(--border-color)",
+      background: "var(--card-bg)",
+      color: "var(--text-main)",
+      borderRadius: 999,
+      padding: "10px 14px",
+      fontWeight: 700,
+      cursor: "pointer",
+      boxShadow: "0 12px 28px rgba(0,0,0,0.12)",
+    }}
+  >
+    Cerez Tercihleri
+  </button>
+);
+
 function App() {
+  const location = useLocation();
+  const [cookieConsent, setCookieConsent] = useState(() => readCookieConsent());
+  const [draftConsent, setDraftConsent] = useState(() => readCookieConsent());
+  const [showCookieBanner, setShowCookieBanner] = useState(() => readCookieConsent().status === "pending");
+  const [showCookieModal, setShowCookieModal] = useState(false);
+  const [showCookieNotice, setShowCookieNotice] = useState(false);
+
+  const applyCookieConsent = useCallback(async (nextConsent) => {
+    const finalConsent = {
+      ...createDefaultCookieConsent(),
+      ...nextConsent,
+      necessary: true,
+      version: COOKIE_CONSENT_VERSION,
+      updatedAt: new Date().toISOString(),
+    };
+
+    writeCookieConsent(finalConsent);
+    clearOptionalCookieStorage({
+      clearPreferences: !finalConsent.preferences,
+      clearPerformance: !finalConsent.performance,
+    });
+
+    setCookieConsent(finalConsent);
+    setDraftConsent(finalConsent);
+    setShowCookieBanner(false);
+    setShowCookieModal(false);
+    setShowCookieNotice(false);
+
+    await persistCookieConsentToDb(finalConsent, `${location.pathname}${location.hash}`);
+  }, [location.hash, location.pathname]);
+
+  const acceptAllCookies = useCallback(() => {
+    void applyCookieConsent({
+      status: "accepted",
+      preferences: true,
+      performance: true,
+    });
+  }, [applyCookieConsent]);
+
+  const rejectAllCookies = useCallback(() => {
+    void applyCookieConsent({
+      status: "rejected",
+      preferences: false,
+      performance: false,
+    });
+  }, [applyCookieConsent]);
+
+  const saveCustomCookieConsent = useCallback(() => {
+    void applyCookieConsent({
+      status: "customized",
+      preferences: Boolean(draftConsent.preferences),
+      performance: Boolean(draftConsent.performance),
+    });
+  }, [applyCookieConsent, draftConsent.performance, draftConsent.preferences]);
+
   return (
-    <Routes>
-      <Route path="/" element={<NewsListPage />} />
-      <Route path="/haber/:newsId" element={<NewsDetailPage />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/" element={<NewsListPage />} />
+        <Route path="/haber/:newsId" element={<NewsDetailPage />} />
+      </Routes>
+
+      {showCookieBanner && (
+        <CookieConsentBanner
+          onAcceptAll={acceptAllCookies}
+          onRejectAll={rejectAllCookies}
+          onOpenSettings={() => {
+            setDraftConsent(cookieConsent);
+            setShowCookieModal(true);
+          }}
+          onOpenNotice={() => setShowCookieNotice(true)}
+        />
+      )}
+
+      {!showCookieBanner && (
+        <CookiePreferencesLink
+          onOpen={() => {
+            setDraftConsent(cookieConsent);
+            setShowCookieModal(true);
+          }}
+        />
+      )}
+
+      {showCookieModal && (
+        <CookieConsentModal
+          draftConsent={draftConsent}
+          onChange={(key, value) => setDraftConsent((current) => ({ ...current, [key]: value }))}
+          onClose={() => setShowCookieModal(false)}
+          onSave={saveCustomCookieConsent}
+          onRejectAll={rejectAllCookies}
+        />
+      )}
+
+      {showCookieNotice && (
+        <CookieConsentModal
+          draftConsent={cookieConsent}
+          onChange={() => {}}
+          onClose={() => setShowCookieNotice(false)}
+          onSave={() => {}}
+          onRejectAll={rejectAllCookies}
+          noticeOnly
+        />
+      )}
+    </>
   );
 }
 
