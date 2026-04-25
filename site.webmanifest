@@ -1,0 +1,17 @@
+{
+  "name": "Bilgin Haber",
+  "short_name": "Bilgin Haber",
+  "start_url": "/HaberUygulamasi/",
+  "display": "standalone",
+  "background_color": "#f8f9fa",
+  "theme_color": "#ff3b30",
+  "lang": "tr-TR",
+  "icons": [
+    {
+      "src": "/HaberUygulamasi/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
