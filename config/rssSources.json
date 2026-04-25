@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Haberturk",
+    "url": "https://www.haberturk.com/rss/manset.xml",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "Hurriyet",
+    "url": "https://www.hurriyet.com.tr/rss/anasayfa",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "Sabah",
+    "url": "https://www.sabah.com.tr/rss/anasayfa.xml",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "CNN Turk",
+    "url": "https://www.cnnturk.com/feed/rss/all/news",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "Cumhuriyet",
+    "url": "https://www.cumhuriyet.com.tr/rss/son_dakika.xml",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "Star",
+    "url": "https://www.star.com.tr/rss/rss.asp",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "Sozcu",
+    "url": "https://www.sozcu.com.tr/rss/",
+    "tier": 1,
+    "enabled": true
+  },
+  {
+    "name": "NTV",
+    "url": "https://www.ntv.com.tr/son-dakika.rss",
+    "tier": 2,
+    "enabled": true
+  },
+  {
+    "name": "Haberler.com",
+    "url": "https://rss.haberler.com/rss.asp",
+    "tier": 2,
+    "enabled": true
+  },
+  {
+    "name": "Anadolu Ajansi",
+    "url": "https://www.aa.com.tr/tr/rss/default?cat=guncel",
+    "tier": 3,
+    "enabled": false
+  },
+  {
+    "name": "Haber7",
+    "url": "https://rss.haber7.com/rss.xml",
+    "tier": 3,
+    "enabled": false
+  }
+]

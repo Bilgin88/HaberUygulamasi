@@ -1,33 +1,41 @@
-import { useState, useEffect, useRef } from 'react';
-import { Flame, Moon, Sun, ChevronRight, Menu, X, ArrowUp, ExternalLink, RefreshCw, AlertCircle } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Flame, Moon, Sun, Menu, X, ArrowUp, ExternalLink, RefreshCw, AlertCircle } from 'lucide-react';
 import { db } from './firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, setDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { formatDistanceToNow } from 'date-fns';
 import { tr } from 'date-fns/locale';
 
-const RSS_SOURCES = [
-  { name: "Habertürk", url: "https://www.haberturk.com/rss" },
-  { name: "Sabah", url: "https://www.sabah.com.tr/rss/anasayfa.xml" },
-  { name: "Sözcü", url: "https://www.sozcu.com.tr/rss/" },
-  { name: "CNN Türk", url: "https://www.cnnturk.com/feed/rss/all/news" },
-  { name: "Cumhuriyet", url: "https://www.cumhuriyet.com.tr/rss/son_dakika.xml" },
-  { name: "Haber7", url: "https://rss.haber7.com/rss/manset.xml" },
-  { name: "Star", url: "https://www.star.com.tr/rss/rss.asp" },
-  { name: "Haberler.com", url: "https://rss.haberler.com/rss.asp" }
+const CATEGORIES = [
+  "T\u00fcm\u00fc",
+  "G\u00fcndem",
+  "Ekonomi",
+  "Spor",
+  "Teknoloji",
+  "D\u00fcnya",
+  "Sa\u011fl\u0131k",
 ];
-
-const CATEGORIES = ["Tümü", "Gündem", "Ekonomi", "Spor", "Teknoloji", "Dünya", "Sağlık"];
-
+const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80";
+const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const STALE_SYNC_MS = 15 * 60 * 1000;
+const FIRESTORE_QUERY_LIMIT = 1500;
+const MAX_ITEMS_PER_SOURCE = 40;
+const RSS_SOURCES = [
+  { name: "Haberturk", url: "https://www.haberturk.com/rss/manset.xml" },
+  { name: "Hurriyet", url: "https://www.hurriyet.com.tr/rss/anasayfa" },
+  { name: "Sabah", url: "https://www.sabah.com.tr/rss/anasayfa.xml" },
+  { name: "CNN Turk", url: "https://www.cnnturk.com/feed/rss/all/news" },
+  { name: "Cumhuriyet", url: "https://www.cumhuriyet.com.tr/rss/son_dakika.xml" },
+  { name: "Star", url: "https://www.star.com.tr/rss/rss.asp" },
+  { name: "Sozcu", url: "https://www.sozcu.com.tr/rss/" },
+  { name: "NTV", url: "https://www.ntv.com.tr/son-dakika.rss" },
+  { name: "Haberler.com", url: "https://rss.haberler.com/rss.asp" },
+];
 const PROXIES = [
   { name: "RSS2JSON", fn: (url) => `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(url)}&nocache=${Date.now()}` },
   { name: "AllOrigins", fn: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
-  { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` }
+  { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
 ];
-
-const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=800&q=80";
-const SYNC_INTERVAL_MS = 5 * 60 * 1000;
-const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
-const MAX_ALLOWED_FUTURE_MS = 10 * 60 * 1000;
 
 const decodeHtmlEntities = (value = "") => {
   if (!value || typeof document === "undefined") return value || "";
@@ -41,11 +49,23 @@ const normalizeText = (value = "") =>
     .replace(/\s+/g, " ")
     .trim();
 
+const normalizeSourceName = (value = "") => {
+  const normalized = normalizeText(value);
+  if (normalized === "CNN Türk") return "CNN Turk";
+  if (normalized === "Hürriyet") return "Hurriyet";
+  if (normalized === "Sözcü") return "Sozcu";
+  if (normalized === "CNN Türk") return "CNN Turk";
+  if (normalized === "Habertürk") return "Haberturk";
+  if (normalized === "Hürriyet") return "Hurriyet";
+  if (normalized === "Sözcü") return "Sozcu";
+  return normalized;
+};
+
 const normalizeNewsItem = (item) => ({
   ...item,
   title: normalizeText(item.title),
   description: normalizeText(item.description),
-  source: normalizeText(item.source),
+  source: normalizeSourceName(item.source),
   category: normalizeText(item.category),
 });
 
@@ -76,13 +96,6 @@ const getEffectivePublishedDate = (value) => {
   return date;
 };
 
-const isValidPublishedAt = (value) => {
-  const date = getPublishedDate(value);
-  if (!date) return false;
-
-  return date.getTime() <= Date.now() + MAX_ALLOWED_FUTURE_MS;
-};
-
 const getPublishedTime = (value) => {
   const date = getEffectivePublishedDate(value);
   return date ? date.getTime() : 0;
@@ -93,7 +106,7 @@ const formatPublishedDistance = (value) => {
   if (!originalDate) return "Tarih yok";
 
   if (originalDate.getTime() > Date.now() + FUTURE_TOLERANCE_MS) {
-    return "Az önce";
+    return "Az \u00f6nce";
   }
 
   const date = getEffectivePublishedDate(value);
@@ -102,6 +115,11 @@ const formatPublishedDistance = (value) => {
 
 const sortNewsByDate = (items = []) =>
   [...items].sort((a, b) => getPublishedTime(b.publishedAt) - getPublishedTime(a.publishedAt));
+
+const isValidPublishedAt = (value) => {
+  const date = getPublishedDate(value);
+  return Boolean(date && date.getTime() <= Date.now() + 10 * 60 * 1000);
+};
 
 const mergeSourceItems = (items = []) => {
   const seen = new Map();
@@ -118,116 +136,126 @@ const mergeSourceItems = (items = []) => {
   return sortNewsByDate(Array.from(seen.values()));
 };
 
+const balanceNewsBySource = (items = []) => {
+  const groups = new Map();
+
+  for (const item of sortNewsByDate(items)) {
+    const source = normalizeSourceName(item.source || "Bilinmeyen");
+    const bucket = groups.get(source) || [];
+    if (bucket.length >= MAX_ITEMS_PER_SOURCE) continue;
+    bucket.push({ ...item, source });
+    groups.set(source, bucket);
+  }
+
+  return sortNewsByDate(Array.from(groups.values()).flat());
+};
+
+const buildSliderNews = (items = [], limitCount = 20) => {
+  const sortedItems = sortNewsByDate(items);
+  const bySource = new Map();
+
+  for (const item of sortedItems) {
+    const source = normalizeSourceName(item.source || "Bilinmeyen");
+    const bucket = bySource.get(source) || [];
+    bucket.push({ ...item, source });
+    bySource.set(source, bucket);
+  }
+
+  const sliderItems = [];
+  const seenUrls = new Set();
+
+  const firstPass = Array.from(bySource.values())
+    .map((bucket) => bucket[0])
+    .filter(Boolean)
+    .sort((a, b) => getPublishedTime(b.publishedAt) - getPublishedTime(a.publishedAt));
+
+  for (const item of firstPass) {
+    if (sliderItems.length >= limitCount) break;
+    if (seenUrls.has(item.url)) continue;
+    sliderItems.push(item);
+    seenUrls.add(item.url);
+  }
+
+  if (sliderItems.length < limitCount) {
+    for (const item of sortedItems) {
+      if (sliderItems.length >= limitCount) break;
+      if (seenUrls.has(item.url)) continue;
+      sliderItems.push(item);
+      seenUrls.add(item.url);
+    }
+  }
+
+  return sliderItems;
+};
+
 function App() {
   const [allNews, setAllNews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [activeCategory, setActiveCategory] = useState("Tümü");
+  const [activeCategory, setActiveCategory] = useState("T\u00fcm\u00fc");
   const [darkMode, setDarkMode] = useState(false);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(40);
   const [lastSyncTs, setLastSyncTs] = useState(null);
+  const [syncMessage, setSyncMessage] = useState("");
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
-  
+
   const isRunning = useRef(false);
+  const syncInFlight = useRef(false);
   const isDragging = useRef(false);
   const startX = useRef(0);
 
-  useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 1024);
-    window.addEventListener('resize', handleResize);
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'dark') {
-      setDarkMode(true);
-      document.documentElement.setAttribute('data-theme', 'dark');
-    }
-    const handleScroll = () => setShowScrollTop(window.scrollY > 400);
-    window.addEventListener('scroll', handleScroll);
-    if (isRunning.current) return;
-    isRunning.current = true;
-    startApp();
-    const interval = setInterval(checkSyncInterval, 50000);
-    return () => { clearInterval(interval); window.removeEventListener('scroll', handleScroll); window.removeEventListener('resize', handleResize); };
-  }, []);
-
-  const startApp = async () => {
-    setLoading(true);
-    const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(400));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => normalizeNewsItem({ id: doc.id, ...doc.data() }));
-      setAllNews(sortNewsByDate(data));
-      setLoading(false);
-    }, () => setLoading(false));
-    checkSyncInterval();
-    return () => unsubscribe();
-  };
-
-  const checkSyncInterval = async (force = false) => {
+  const refreshSyncStatus = useCallback(async () => {
     try {
       const syncRef = doc(db, "settings", "lastSync");
       const syncDoc = await getDoc(syncRef);
-      const now = Date.now();
       const lastTime = syncDoc.data()?.time?.toMillis?.() || 0;
-      setLastSyncTs(lastTime);
-      if (force || !lastTime || now - lastTime > SYNC_INTERVAL_MS) {
-        await loadSync(force);
-      }
-    } catch (e) {
-      await loadSync(force);
+      setLastSyncTs(lastTime || null);
+      return lastTime || null;
+    } catch {
+      setLastSyncTs(null);
+      return null;
     }
-  };
+  }, []);
 
-  const loadSync = async (force = false) => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const allNewItems = [];
-      for (const source of RSS_SOURCES) {
-        const sourceItems = [];
+  const categorize = useCallback((text) => {
+    const low = text.toLowerCase();
+    if (low.match(/dolar|euro|faiz|altin|borsa|ekonomi|banka|emekli|maas|zam/)) return "Ekonomi";
+    if (low.match(/mac|futbol|gol|transfer|derbi|spor|basketbol|voleybol/)) return "Spor";
+    if (low.match(/iphone|android|teknoloji|yapay zeka|ai|yazilim|dijital/)) return "Teknoloji";
+    if (low.match(/dunya|dis haber|abd|rusya|ukrayna|avrupa|asya|israil/)) return "Dunya";
+    if (low.match(/saglik|doktor|hastane|tedavi|ilac|ameliyat|virus|kalp/)) return "Saglik";
+    return "Gundem";
+  }, []);
 
-        for (const proxy of PROXIES) {
-          try {
-            const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(8000) });
-            if (!res.ok) continue;
+  const parseMarkdownFeed = useCallback((markdown = "", source) => {
+    const entries = [];
+    const pattern = /###\s+\[(.+?)\]\((https?:\/\/[^\s)]+)\)\s+([\s\S]*?)\n(?:\[https?:\/\/[^\]]+\]\([^)]+\)\s+)?([A-Za-z]{3},\s+\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+GMT)/g;
+    let match;
 
-            if (proxy.name === "RSS2JSON") {
-              const data = await res.json();
-              if (data.status === 'ok') {
-                 const processed = data.items.map(item => parseItem(item, source.name));
-                 sourceItems.push(...processed);
-              }
-            } else {
-              let xml = (proxy.name === "AllOrigins") ? (await res.json()).contents : await res.text();
-              if (xml && xml.includes("<item")) {
-                const docParsed = new DOMParser().parseFromString(xml, "text/xml");
-                const items = Array.from(docParsed.querySelectorAll("item, entry")).slice(0, 50);
-                const processed = items.map(item => parseXmlItem(item, source.name));
-                sourceItems.push(...processed);
-              }
-            }
-          } catch (e) { }
-        }
-
-        allNewItems.push(...mergeSourceItems(sourceItems).slice(0, 30));
-      }
-
-      if (allNewItems.length > 0) {
-        await saveToFirestoreBatch(allNewItems);
-      }
-
-      await setDoc(doc(db, "settings", "lastSync"), { time: serverTimestamp() }, { merge: true });
-      setLastSyncTs(Date.now());
-    } finally {
-      setSyncing(false);
+    while ((match = pattern.exec(markdown)) !== null) {
+      const [, title, url, body, rawDate] = match;
+      const dateObj = new Date(rawDate);
+      entries.push({
+        title: normalizeText(title),
+        description: normalizeText(body).substring(0, 180),
+        url,
+        image: FALLBACK_IMAGE,
+        source,
+        category: categorize(normalizeText(title)),
+        publishedAt: Number.isNaN(dateObj.getTime()) ? "N/A" : dateObj.toISOString(),
+      });
     }
-  };
 
-  const parseItem = (item, source) => {
+    return entries;
+  }, [categorize]);
+
+  const parseItem = useCallback((item, source) => {
     const rawDate = item.pubDate || item.published;
     const dateObj = rawDate ? new Date(rawDate) : null;
-    const publishedAt = (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A";
+    const publishedAt = (dateObj && !Number.isNaN(dateObj.getTime())) ? dateObj.toISOString() : "N/A";
 
     return {
       title: normalizeText(item.title || ""),
@@ -236,17 +264,21 @@ function App() {
       image: item.enclosure?.link || item.thumbnail || FALLBACK_IMAGE,
       source: normalizeText(source),
       category: categorize(normalizeText(item.title || "")),
-      publishedAt
+      publishedAt,
     };
-  };
+  }, [categorize]);
 
-  const parseXmlItem = (item, source) => {
+  const parseXmlItem = useCallback((item, source) => {
     const desc = item.querySelector("description, summary, content")?.textContent || "";
     let img = item.querySelector("enclosure")?.getAttribute("url") || item.querySelector("content[url]")?.getAttribute("url") || "";
-    if (!img) { const m = desc.match(/<img[^>]+src="([^">]+)"/); if (m) img = m[1]; }
-    const rawDate = item.querySelector("pubDate, published")?.textContent;
+    if (!img) {
+      const match = desc.match(/<img[^>]+src="([^">]+)"/);
+      if (match) img = match[1];
+    }
+
+    const rawDate = item.querySelector("pubDate, published, updated")?.textContent;
     const dateObj = rawDate ? new Date(rawDate) : null;
-    const publishedAt = (dateObj && !isNaN(dateObj)) ? dateObj.toISOString() : "N/A";
+    const publishedAt = (dateObj && !Number.isNaN(dateObj.getTime())) ? dateObj.toISOString() : "N/A";
 
     return {
       title: normalizeText(item.querySelector("title")?.textContent || ""),
@@ -255,51 +287,220 @@ function App() {
       image: img || FALLBACK_IMAGE,
       source: normalizeText(source),
       category: categorize(normalizeText(item.querySelector("title")?.textContent || "")),
-      publishedAt
+      publishedAt,
     };
-  };
+  }, [categorize]);
 
-  const categorize = (text) => {
-    const low = text.toLowerCase();
-    if (low.match(/dolar|euro|faiz|altın|borsa|ekonomi|banka|emekli|maaş|zam/)) return "Ekonomi";
-    if (low.match(/maç|futbol|gol|transfer|derbi|spor|basketbol|voleybol/)) return "Spor";
-    if (low.match(/iphone|android|teknoloji|yapay zeka|ai|yazılım|dijital/)) return "Teknoloji";
-    if (low.match(/dünya|dış haber|abd|rusya|ukrayna|avrupa|asya|israil/)) return "Dünya";
-    if (low.match(/sağlık|doktor|hastane|tedavi|ilaç|ameliyat|virüs|kalp/)) return "Sağlık";
-    return "Gündem";
-  }
+  const fetchSourceFallbackItems = useCallback(async (source) => {
+    if (source.name !== "Haberturk") return [];
 
-  const saveToFirestoreBatch = async (items) => {
     try {
-      const batch = writeBatch(db);
-      items.filter(it => it.url && it.url !== "#" && it.publishedAt !== "N/A" && isValidPublishedAt(it.publishedAt)).forEach(item => {
-        const id = btoa(unescape(encodeURIComponent(item.url))).substring(0, 150).replace(/\//g, '_');
-        batch.set(doc(db, "news", id), { ...item, updatedAt: serverTimestamp() }, { merge: true });
-      });
-      await batch.commit();
-    } catch (e) { }
-  };
+      const fallbackUrl = `https://r.jina.ai/http://${source.url.replace(/^https?:\/\//, "")}`;
+      const res = await fetch(fallbackUrl, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) return [];
+      const markdown = await res.text();
+      return parseMarkdownFeed(markdown, source.name);
+    } catch {
+      return [];
+    }
+  }, [parseMarkdownFeed]);
+
+  const saveToFirestoreBatch = useCallback(async (items) => {
+    const validItems = items.filter((item) => item.url && item.url !== "#" && item.publishedAt !== "N/A" && isValidPublishedAt(item.publishedAt));
+    if (validItems.length === 0) return;
+
+    const batch = writeBatch(db);
+    validItems.forEach((item) => {
+      const id = btoa(unescape(encodeURIComponent(item.url))).substring(0, 150).replace(/\//g, '_');
+      batch.set(doc(db, "news", id), { ...item, updatedAt: serverTimestamp() }, { merge: true });
+    });
+    await batch.commit();
+  }, []);
+
+  const runSync = useCallback(async () => {
+    if (syncInFlight.current) return false;
+
+    syncInFlight.current = true;
+    setSyncing(true);
+    setSyncMessage("Kaynaklar guncelleniyor...");
+    try {
+      const allNewItems = [];
+      const sourceHealth = [];
+
+      for (const source of RSS_SOURCES) {
+        const sourceItems = [];
+        const sourceDiagnostics = [];
+
+        for (const proxy of PROXIES) {
+          try {
+            const res = await fetch(proxy.fn(source.url), { signal: AbortSignal.timeout(8000) });
+            if (!res.ok) {
+              sourceDiagnostics.push({ proxy: proxy.name, status: "http_error", code: res.status });
+              continue;
+            }
+
+            if (proxy.name === "RSS2JSON") {
+              const data = await res.json();
+              if (data.status === "ok" && Array.isArray(data.items)) {
+                sourceItems.push(...data.items.map((item) => parseItem(item, source.name)));
+                sourceDiagnostics.push({ proxy: proxy.name, status: "ok", items: data.items.length });
+              } else {
+                sourceDiagnostics.push({ proxy: proxy.name, status: "empty" });
+              }
+              continue;
+            }
+
+            const xml = proxy.name === "AllOrigins" ? (await res.json()).contents : await res.text();
+            if (!xml || (!xml.includes("<item") && !xml.includes("<entry"))) {
+              sourceDiagnostics.push({ proxy: proxy.name, status: "empty" });
+              continue;
+            }
+
+            const parsed = new DOMParser().parseFromString(xml, "text/xml");
+            const items = Array.from(parsed.querySelectorAll("item, entry")).slice(0, 50);
+            sourceItems.push(...items.map((item) => parseXmlItem(item, source.name)));
+            sourceDiagnostics.push({ proxy: proxy.name, status: "ok", items: items.length });
+          } catch {
+            sourceDiagnostics.push({ proxy: proxy.name, status: "error" });
+            continue;
+          }
+        }
+
+        const fallbackItems = await fetchSourceFallbackItems(source);
+        if (fallbackItems.length > 0) {
+          sourceItems.push(...fallbackItems);
+          sourceDiagnostics.push({ proxy: "JinaFallback", status: "ok", items: fallbackItems.length });
+        }
+
+        const mergedItems = mergeSourceItems(sourceItems).slice(0, 30);
+        allNewItems.push(...mergedItems);
+        sourceHealth.push({
+          source: source.name,
+          url: source.url,
+          itemCount: mergedItems.length,
+          status: mergedItems.length > 0 ? "ok" : "empty",
+          checkedAt: new Date().toISOString(),
+          diagnostics: sourceDiagnostics,
+        });
+      }
+
+      if (allNewItems.length > 0) {
+        await saveToFirestoreBatch(allNewItems);
+        await setDoc(doc(db, "settings", "lastSync"), { time: serverTimestamp() }, { merge: true });
+        setSyncMessage(`Guncelleme tamamlandi. ${allNewItems.length} haber alindi.`);
+      } else {
+        setSyncMessage("Kaynaklardan veri alinamadi. Son durum gosteriliyor.");
+      }
+
+      await setDoc(doc(db, "settings", "feedHealth"), {
+        updatedAt: serverTimestamp(),
+        sources: sourceHealth,
+      }, { merge: true });
+      await refreshSyncStatus();
+      return allNewItems.length > 0;
+    } catch {
+      await refreshSyncStatus();
+      setSyncMessage("Guncelleme baslatilamadi. Son durum gosteriliyor.");
+      return false;
+    } finally {
+      syncInFlight.current = false;
+      setSyncing(false);
+    }
+  }, [fetchSourceFallbackItems, parseItem, parseXmlItem, refreshSyncStatus, saveToFirestoreBatch]);
+
+  const triggerManualSync = useCallback(async () => {
+    await runSync();
+  }, [runSync]);
+
+  const syncStatusText = (() => {
+    if (syncing) {
+      return syncMessage || "Kaynaklar guncelleniyor...";
+    }
+
+    if (!lastSyncTs) {
+      return "Canli akis";
+    }
+
+    if (Date.now() - lastSyncTs > STALE_SYNC_MS) {
+      return `Guncelleme gecikti: ${formatDistanceToNow(lastSyncTs, { addSuffix: true, locale: tr })}`;
+    }
+
+    return `Guncellendi: ${formatDistanceToNow(lastSyncTs, { addSuffix: true, locale: tr })}`;
+  })();
+
+  const startApp = useCallback(async () => {
+    setLoading(true);
+
+    const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(FIRESTORE_QUERY_LIMIT));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map((newsDoc) => normalizeNewsItem({ id: newsDoc.id, ...newsDoc.data() }));
+      setAllNews(balanceNewsBySource(data));
+      setLoading(false);
+    }, () => setLoading(false));
+
+    const lastTime = await refreshSyncStatus();
+    if (!lastTime || Date.now() - lastTime > AUTO_SYNC_INTERVAL_MS) {
+      void runSync();
+    }
+    return unsubscribe;
+  }, [refreshSyncStatus, runSync]);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 1024);
+    const handleScroll = () => setShowScrollTop(window.scrollY > 400);
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('scroll', handleScroll);
+
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark') {
+      setDarkMode(true);
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+
+    if (isRunning.current) return undefined;
+    isRunning.current = true;
+
+    const unsubscribePromise = startApp();
+    const intervalId = window.setInterval(async () => {
+      const lastTime = await refreshSyncStatus();
+      if (!lastTime || Date.now() - lastTime > AUTO_SYNC_INTERVAL_MS) {
+        void runSync();
+      }
+    }, 60 * 1000);
+
+    return () => {
+      unsubscribePromise.then((unsubscribe) => unsubscribe?.());
+      window.clearInterval(intervalId);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [refreshSyncStatus, runSync, startApp]);
 
   const filteredNews = sortNewsByDate(
-    activeCategory === "Tümü" ? allNews : allNews.filter(n => n.category === activeCategory)
+    activeCategory === "T\u00fcm\u00fc" ? allNews : allNews.filter((item) => item.category === activeCategory)
   );
-  const sliderLimit = isMobile ? 8 : 20; 
-  const sliderHaberler = filteredNews.slice(0, sliderLimit);
+  const sliderLimit = isMobile ? 8 : 20;
+  const sliderHaberler = buildSliderNews(filteredNews, sliderLimit);
   const gridHaberler = filteredNews.slice(0, visibleCount);
 
   useEffect(() => {
     setCurrentSlide(0);
   }, [activeCategory, allNews, sliderLimit]);
 
-  const onHandleStart = (e) => { isDragging.current = true; startX.current = e.pageX || e.touches[0].pageX; };
+  const onHandleStart = (e) => {
+    isDragging.current = true;
+    startX.current = e.pageX || e.touches[0].pageX;
+  };
+
   const onHandleEnd = (e) => {
     if (!isDragging.current) return;
     isDragging.current = false;
     const endX = e.pageX || e.changedTouches[0].pageX;
     const diff = startX.current - endX;
     if (Math.abs(diff) > 50) {
-      if (diff > 0) setCurrentSlide(p => (p === sliderHaberler.length - 1 ? 0 : p + 1));
-      else setCurrentSlide(p => (p === 0 ? sliderHaberler.length - 1 : p - 1));
+      if (diff > 0) setCurrentSlide((p) => (p === sliderHaberler.length - 1 ? 0 : p + 1));
+      else setCurrentSlide((p) => (p === 0 ? sliderHaberler.length - 1 : p - 1));
     }
   };
 
@@ -307,112 +508,113 @@ function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-left">
-          <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu/></button>
+          <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu /></button>
           <div className="brand" onClick={() => window.location.reload()}><Flame className="brand-icon" size={28} /><span>Bilgin Haber</span></div>
         </div>
         <nav className={`header-center ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
-          {isMobileMenuOpen && <div className="mobile-nav-header"><Flame size={24}/><span>Kategoriler</span><button onClick={()=>setIsMobileMenuOpen(false)}><X/></button></div>}
-          {CATEGORIES.map(cat => (
-            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => {setActiveCategory(cat); setVisibleCount(40); window.scrollTo({top:0, behavior:'smooth'}); setIsMobileMenuOpen(false);}}>{cat}</button>
+          {isMobileMenuOpen && <div className="mobile-nav-header"><Flame size={24} /><span>Kategoriler</span><button onClick={() => setIsMobileMenuOpen(false)}><X /></button></div>}
+          {CATEGORIES.map((cat) => (
+            <button key={cat} className={`nav-link ${activeCategory === cat ? 'active' : ''}`} onClick={() => { setActiveCategory(cat); setVisibleCount(40); window.scrollTo({ top: 0, behavior: 'smooth' }); setIsMobileMenuOpen(false); }}>{cat}</button>
           ))}
         </nav>
         <div className="header-right">
-           <button className="icon-btn refresh-trigger" onClick={() => checkSyncInterval(true)} disabled={syncing} title="Hemen Tazele"><RefreshCw size={20} className={syncing ? "spin" : ""} /></button>
-           <button className="icon-btn" onClick={() => {
-            const m = !darkMode; setDarkMode(m);
-            document.documentElement.setAttribute('data-theme', m ? 'dark' : 'light');
-            localStorage.setItem('theme', m ? 'dark' : 'light');
-           }} title="Tema Değiştir">{darkMode ? <Sun/> : <Moon/>}</button>
+          <button className="icon-btn refresh-trigger" onClick={triggerManualSync} disabled={syncing} title="Simdi Guncelle"><RefreshCw size={20} className={syncing ? "spin" : ""} /></button>
+          <button className="icon-btn" onClick={() => {
+            const mode = !darkMode;
+            setDarkMode(mode);
+            document.documentElement.setAttribute('data-theme', mode ? 'dark' : 'light');
+            localStorage.setItem('theme', mode ? 'dark' : 'light');
+          }} title="Tema De\u011fi\u015ftir">{darkMode ? <Sun /> : <Moon />}</button>
         </div>
       </header>
 
       <main className="main-container">
         {loading ? (
-             <div className="loading-container"><div className="spinner"></div><p style={{marginTop:'1.5rem'}}>Haber Akışı Hazırlanıyor...</p></div>
+          <div className="loading-container"><div className="spinner"></div><p style={{ marginTop: '1.5rem' }}>{'Haber Ak\u0131\u015f\u0131 Haz\u0131rlan\u0131yor...'}</p></div>
         ) : (
           <div className="fade-in">
-             <div className="sync-info-row">
-                <div className={`status-pill ${syncing ? 'syncing' : ''}`}>
-                   {syncing ? <RefreshCw size={14} className="spin"/> : <AlertCircle size={14}/>}
-                   {syncing ? 'Tazeleniyor...' : lastSyncTs ? `Güncellendi: ${formatDistanceToNow(lastSyncTs, { addSuffix: true, locale: tr })}` : 'Canlı Akış'}
-                </div>
-                <div className="sort-label">🔄 Zengin Haber Akışı</div>
-             </div>
-             
-             {sliderHaberler.length > 0 && (
-               <section className="hero-grid-wrapper">
-                  <div className="slider-main" onMouseDown={onHandleStart} onMouseUp={onHandleEnd} onTouchStart={onHandleStart} onTouchEnd={onHandleEnd}>
-                    <div className="slider-track" style={{ transform: `translateX(-${currentSlide * 100}%)` }}>
-                      {sliderHaberler.map((item, index) => (
-                        <div key={item.id || index} className="slide">
-                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="slide-link">
-                            <img src={item.image} alt={item.title} className="slide-img" draggable="false" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
-                            <div className="slide-content">
-                               <div className="slide-meta"><span className="source-tag">{item.source}</span>{" "}<span className="time-tag">{formatPublishedDistance(item.publishedAt)}</span></div>
-                               <h2 className="slide-title">{item.title}</h2>
-                            </div>
-                          </a>
-                        </div>
+            <div className="sync-info-row">
+              <div className={`status-pill ${syncing ? 'syncing' : ''}`}>
+                {syncing ? <RefreshCw size={14} className="spin" /> : <AlertCircle size={14} />}
+                {syncStatusText}
+              </div>
+              <div className="sort-label">{'Zengin Haber Ak\u0131\u015f\u0131'}</div>
+            </div>
+
+            {sliderHaberler.length > 0 && (
+              <section className="hero-grid-wrapper">
+                <div className="slider-main" onMouseDown={onHandleStart} onMouseUp={onHandleEnd} onTouchStart={onHandleStart} onTouchEnd={onHandleEnd}>
+                  <div className="slider-track" style={{ transform: `translateX(-${currentSlide * 100}%)` }}>
+                    {sliderHaberler.map((item, index) => (
+                      <div key={item.id || index} className="slide">
+                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="slide-link">
+                          <img src={item.image} alt={item.title} className="slide-img" draggable="false" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
+                          <div className="slide-content">
+                            <div className="slide-meta"><span className="source-tag">{item.source}</span>{" "}<span className="time-tag">{formatPublishedDistance(item.publishedAt)}</span></div>
+                            <h2 className="slide-title">{item.title}</h2>
+                          </div>
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="slider-numbers-container">
+                    <div className="num-scroll-helper">
+                      {sliderHaberler.map((_, idx) => (
+                        <button key={idx} className={`slider-num-btn ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>{idx + 1}</button>
                       ))}
                     </div>
-                    <div className="slider-numbers-container">
-                       <div className="num-scroll-helper">
-                          {sliderHaberler.map((_, idx) => (
-                            <button key={idx} className={`slider-num-btn ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>{idx + 1}</button>
-                          ))}
-                       </div>
-                    </div>
                   </div>
-                  
-                  <aside className="slider-aside">
-                     {sliderHaberler.slice(0, 6).map((item, idx) => (
-                       <div key={idx} className={`aside-card ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>
-                          <span className="aside-num">{idx + 1}</span>
-                          <div className="aside-info">
-                             <p className="aside-source">{item.source} {formatPublishedDistance(item.publishedAt)}</p>
-                             <h3 className="aside-title">{item.title}</h3>
-                          </div>
-                       </div>
-                     ))}
-                  </aside>
-               </section>
-             )}
-
-             <section className="main-grid-section">
-                <h2 className="grid-header">En Yeni Gelişmeler</h2>
-                <div className="news-grid">
-                   {gridHaberler.map((item, idx) => (
-                     <article key={item.id || idx} className="news-card">
-                        <div className="card-media">
-                          <a href={item.url} target="_blank" rel="noopener noreferrer">
-                             <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
-                          </a>
-                          <span className="card-badge">{item.source}</span>
-                        </div>
-                        <div className="card-body">
-                          <div className="card-top">
-                             <span className="card-cat">{item.category}</span>
-                             <span className="card-sep">&nbsp;</span>
-                             <span className="card-time">{formatPublishedDistance(item.publishedAt)}</span>
-                          </div>
-                          <h2 className="card-title">{item.title}</h2>
-                          <div className="card-footer">
-                             <a href={item.url} target="_blank" rel="noopener noreferrer" className="btn-read">Habere Git <ExternalLink size={14}/></a>
-                          </div>
-                        </div>
-                     </article>
-                   ))}
                 </div>
-                {visibleCount < filteredNews.length && (
-                   <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount(p => p + 15)}>Daha Fazla Goster</button></div>
-                )}
-             </section>
+
+                <aside className="slider-aside">
+                  {sliderHaberler.slice(0, 6).map((item, idx) => (
+                    <div key={idx} className={`aside-card ${currentSlide === idx ? 'active' : ''}`} onClick={() => setCurrentSlide(idx)}>
+                      <span className="aside-num">{idx + 1}</span>
+                      <div className="aside-info">
+                        <p className="aside-source">{item.source} {formatPublishedDistance(item.publishedAt)}</p>
+                        <h3 className="aside-title">{item.title}</h3>
+                      </div>
+                    </div>
+                  ))}
+                </aside>
+              </section>
+            )}
+
+            <section className="main-grid-section">
+              <h2 className="grid-header">{'En Yeni Geli\u015fmeler'}</h2>
+              <div className="news-grid">
+                {gridHaberler.map((item, idx) => (
+                  <article key={item.id || idx} className="news-card">
+                    <div className="card-media">
+                      <a href={item.url} target="_blank" rel="noopener noreferrer">
+                        <img src={item.image} alt={item.title} className="card-img" onError={(e) => { e.target.onerror = null; e.target.src = FALLBACK_IMAGE; }} />
+                      </a>
+                      <span className="card-badge">{item.source}</span>
+                    </div>
+                    <div className="card-body">
+                      <div className="card-top">
+                        <span className="card-cat">{item.category}</span>
+                        <span className="card-sep">&nbsp;</span>
+                        <span className="card-time">{formatPublishedDistance(item.publishedAt)}</span>
+                      </div>
+                      <h2 className="card-title">{item.title}</h2>
+                      <div className="card-footer">
+                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="btn-read">Habere Git <ExternalLink size={14} /></a>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              {visibleCount < filteredNews.length && (
+                <div className="load-more-center"><button className="btn-more" onClick={() => setVisibleCount((p) => p + 15)}>Daha Fazla Goster</button></div>
+              )}
+            </section>
           </div>
         )}
       </main>
 
-      <button className={`scroll-to-top ${showScrollTop ? 'visible' : ''}`} onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={24}/></button>
-      <footer className="app-footer"><div className="footer-content"><Flame size={20}/> <span>Bilgin Haber © 2026 - Tüm Hakları Saklıdır</span></div></footer>
+      <button className={`scroll-to-top ${showScrollTop ? 'visible' : ''}`} onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={24} /></button>
+      <footer className="app-footer"><div className="footer-content"><Flame size={20} /> <span>{'Bilgin Haber \u00a9 2026 - T\u00fcm Haklar\u0131 Sakl\u0131d\u0131r'}</span></div></footer>
 
       <style>{`
         :root {
@@ -427,8 +629,7 @@ function App() {
         }
 
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-main); color: var(--text-main); transition: 0.3s; overflow-x: hidden; touch-action: pan-y; }
-        
-        /* HEADER & NAVIGATION */
+
         .app-header { position: sticky; top: 0; z-index: 1000; height: 75px; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; background: var(--header-bg); backdrop-filter: saturate(180%) blur(25px); border-bottom: 1px solid var(--border-color); }
         .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.5rem; color: var(--primary); cursor: pointer; }
         .header-center { display: flex; gap: 15px; }
@@ -436,15 +637,13 @@ function App() {
         .nav-link.active { color: var(--primary); }
         .mobile-menu-btn { display: none; background: none; border: none; color: var(--text-main); cursor: pointer; }
 
-        /* PILLS & STATUS */
         .sync-info-row { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0 2rem; }
         .status-pill, .sort-label { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 900; background: var(--card-bg); padding: 10px 22px; border-radius: 40px; border: 1px solid var(--border-color); color: var(--text-secondary); box-shadow: var(--shadow-sm); }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .spin { animation: spin 2s linear infinite; }
 
         .main-container { max-width: 1400px; margin: 0 auto; padding: 0 5% 5rem; }
-        
-        /* HERO AREA - STABLE */
+
         .hero-grid-wrapper { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; height: 500px; margin-bottom: 4.5rem; position: relative; z-index: 20; }
         .slider-main { position: relative; border-radius: 28px; overflow: hidden; background: #000; box-shadow: var(--shadow-md); height: 100%; cursor: grab; }
         .slider-track { display: flex; height: 100%; transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1); pointer-events: none; }
@@ -465,7 +664,6 @@ function App() {
         .aside-source { font-size: 0.75rem; line-height: 1.35; color: var(--text-secondary); margin: 0 0 6px; }
         .aside-title { font-size: 0.95rem; line-height: 1.35; margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; word-break: break-word; }
 
-        /* GRID & CARDS - BUTTON FIX */
         .main-grid-section { position: relative; z-index: 10; padding-top: 1rem; clear: both; }
         .news-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
         .news-card { background: var(--card-bg); border-radius: 28px; overflow: hidden; border: 1px solid var(--border-color); display: flex; flex-direction: column; transition: 0.3s; box-shadow: var(--shadow-sm); }
@@ -473,8 +671,7 @@ function App() {
         .card-badge { position: absolute; top: 15px; right: 15px; background: var(--primary); color: white; padding: 6px 12px; border-radius: 10px; font-size: 0.75rem; font-weight: 900; z-index: 10; }
         .card-body { padding: 25px; flex-grow: 1; display: flex; flex-direction: column; }
         .card-title { font-size: 1.25rem; font-weight: 800; line-height: 1.4; color: var(--text-main); margin-bottom: 25px; }
-        
-        /* PREMIUM HABERE GİT BUTTON */
+
         .card-footer { margin-top: auto; padding-top: 15px; border-top: 1px solid var(--border-color); }
         .btn-read { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--primary); color: white; padding: 12px 20px; border-radius: 15px; font-weight: 800; text-decoration: none; transition: 0.3s; border: none; cursor: pointer; }
         .btn-read:hover { background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255, 59, 48, 0.3); }
@@ -483,10 +680,9 @@ function App() {
         .btn-more:hover { transform: translateY(-2px); border-color: rgba(255, 59, 48, 0.35); box-shadow: 0 18px 36px rgba(255, 59, 48, 0.14), inset 0 1px 0 rgba(255,255,255,0.95); background: linear-gradient(135deg, rgba(255,255,255,1), rgba(255,238,235,1)); }
         .btn-more:active { transform: translateY(0); box-shadow: 0 10px 20px rgba(255, 59, 48, 0.12); }
 
-        /* MISC */
         .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); }
         .scroll-to-top.visible { opacity: 1; visibility: visible; }
-        
+
         @media (max-width: 1024px) {
           .mobile-menu-btn { display: block; }
           .header-center { position: fixed; top: 0; left: -105%; width: 280px; height: 100vh; background: var(--card-bg); flex-direction: column; align-items: flex-start; padding: 25px; transition: 0.4s cubic-bezier(0.16, 1, 0.3, 1); z-index: 2000; box-shadow: 20px 0 50px rgba(0,0,0,0.2); }
