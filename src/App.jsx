@@ -37,6 +37,11 @@ const PROXIES = [
   { name: "AllOrigins", fn: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
   { name: "CodeTabs", fn: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
 ];
+const SITE_URL = "https://bilgin88.github.io/HaberUygulamasi";
+const SITE_NAME = "Bilgin Haber";
+const DEFAULT_SEO_TITLE = "Bilgin Haber | Son Dakika Haberler, Gundem, Ekonomi, Spor ve Teknoloji";
+const DEFAULT_SEO_DESCRIPTION = "Bilgin Haber, Turkiye ve dunya gundeminden son dakika haberlerini; ekonomi, spor, teknoloji, saglik ve dunya kategorileriyle tek akista sunar.";
+const DEFAULT_OG_IMAGE = FALLBACK_IMAGE;
 const COOKIE_CONSENT_VERSION = "2026-04-25";
 const COOKIE_CONSENT_STORAGE_KEY = "bilgin-cookie-consent";
 const COOKIE_CONSENT_ID_STORAGE_KEY = "bilgin-cookie-consent-id";
@@ -183,6 +188,12 @@ const normalizeText = (value = "") =>
   decodeHtmlEntities(String(value))
     .replace(/\s+/g, " ")
     .trim();
+
+const truncateText = (value = "", maxLength = 160) => {
+  const normalized = normalizeText(value);
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+};
 
 const normalizeSourceName = (value = "") => {
   const normalized = normalizeText(value);
@@ -381,6 +392,66 @@ const extractNewsIdFromRouteParam = (routeParam = "") => {
   if (separatorIndex === -1) return decodedParam;
 
   return decodedParam.slice(separatorIndex + 2);
+};
+
+const buildAbsoluteAppUrl = (path = "/") => {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${SITE_URL}#${normalizedPath}`;
+};
+
+const setHeadTag = ({ selector, tagName, attributes, textContent }) => {
+  if (typeof document === "undefined") return;
+
+  let element = document.head.querySelector(selector);
+  if (!element) {
+    element = document.createElement(tagName);
+    document.head.appendChild(element);
+  }
+
+  Object.entries(attributes || {}).forEach(([key, value]) => {
+    if (value === null || value === undefined) {
+      element.removeAttribute(key);
+      return;
+    }
+    element.setAttribute(key, value);
+  });
+
+  if (typeof textContent === "string") {
+    element.textContent = textContent;
+  }
+};
+
+const applySeoMetadata = ({ title, description, canonicalPath = "/", image = DEFAULT_OG_IMAGE, type = "website", schema }) => {
+  if (typeof document === "undefined") return;
+
+  const normalizedTitle = title || DEFAULT_SEO_TITLE;
+  const normalizedDescription = truncateText(description || DEFAULT_SEO_DESCRIPTION, 180);
+  const canonicalUrl = buildAbsoluteAppUrl(canonicalPath);
+
+  document.title = normalizedTitle;
+
+  setHeadTag({ selector: 'meta[name="description"]', tagName: "meta", attributes: { name: "description", content: normalizedDescription } });
+  setHeadTag({ selector: 'meta[name="robots"]', tagName: "meta", attributes: { name: "robots", content: "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" } });
+  setHeadTag({ selector: 'meta[property="og:title"]', tagName: "meta", attributes: { property: "og:title", content: normalizedTitle } });
+  setHeadTag({ selector: 'meta[property="og:description"]', tagName: "meta", attributes: { property: "og:description", content: normalizedDescription } });
+  setHeadTag({ selector: 'meta[property="og:type"]', tagName: "meta", attributes: { property: "og:type", content: type } });
+  setHeadTag({ selector: 'meta[property="og:url"]', tagName: "meta", attributes: { property: "og:url", content: canonicalUrl } });
+  setHeadTag({ selector: 'meta[property="og:image"]', tagName: "meta", attributes: { property: "og:image", content: image } });
+  setHeadTag({ selector: 'meta[property="og:site_name"]', tagName: "meta", attributes: { property: "og:site_name", content: SITE_NAME } });
+  setHeadTag({ selector: 'meta[name="twitter:card"]', tagName: "meta", attributes: { name: "twitter:card", content: "summary_large_image" } });
+  setHeadTag({ selector: 'meta[name="twitter:title"]', tagName: "meta", attributes: { name: "twitter:title", content: normalizedTitle } });
+  setHeadTag({ selector: 'meta[name="twitter:description"]', tagName: "meta", attributes: { name: "twitter:description", content: normalizedDescription } });
+  setHeadTag({ selector: 'meta[name="twitter:image"]', tagName: "meta", attributes: { name: "twitter:image", content: image } });
+  setHeadTag({ selector: 'link[rel="canonical"]', tagName: "link", attributes: { rel: "canonical", href: canonicalUrl } });
+
+  if (schema) {
+    setHeadTag({
+      selector: 'script[data-seo-schema="primary"]',
+      tagName: "script",
+      attributes: { type: "application/ld+json", "data-seo-schema": "primary" },
+      textContent: JSON.stringify(schema),
+    });
+  }
 };
 
 const buildDetailParagraphs = (description = "") => {
@@ -768,6 +839,45 @@ function NewsListPage() {
   const gridHaberler = buildGridNews(filteredNews, visibleCount);
 
   useEffect(() => {
+    const title = activeCategory === "T\u00fcm\u00fc"
+      ? DEFAULT_SEO_TITLE
+      : `${SITE_NAME} | ${activeCategory} Haberleri ve Son Gelismeler`;
+    const descriptionSource = sliderHaberler[0]?.description || gridHaberler[0]?.description || DEFAULT_SEO_DESCRIPTION;
+    const description = activeCategory === "T\u00fcm\u00fc"
+      ? DEFAULT_SEO_DESCRIPTION
+      : `${activeCategory} kategorisinde guncel haberler: ${truncateText(descriptionSource, 120)}`;
+
+    const schema = {
+      "@context": "https://schema.org",
+      "@type": "CollectionPage",
+      name: title,
+      description,
+      url: buildAbsoluteAppUrl("/"),
+      isPartOf: {
+        "@type": "WebSite",
+        name: SITE_NAME,
+        url: SITE_URL,
+      },
+      about: activeCategory === "T\u00fcm\u00fc" ? "Guncel haber akisi" : `${activeCategory} haberleri`,
+      hasPart: sliderHaberler.slice(0, 10).map((item) => ({
+        "@type": "ListItem",
+        position: sliderHaberler.indexOf(item) + 1,
+        url: buildAbsoluteAppUrl(buildNewsRoute(item.id, item.title)),
+        name: item.title,
+      })),
+    };
+
+    applySeoMetadata({
+      title,
+      description,
+      canonicalPath: "/",
+      image: sliderHaberler[0]?.image || DEFAULT_OG_IMAGE,
+      type: "website",
+      schema,
+    });
+  }, [activeCategory, gridHaberler, sliderHaberler]);
+
+  useEffect(() => {
     setCurrentSlide(0);
   }, [activeCategory, allNews, sliderLimit]);
 
@@ -1072,6 +1182,63 @@ function NewsDetailPage() {
 
     void loadNewsItem();
   }, [resolvedNewsId]);
+
+  useEffect(() => {
+    if (!newsItem) {
+      applySeoMetadata({
+        title: DEFAULT_SEO_TITLE,
+        description: DEFAULT_SEO_DESCRIPTION,
+        canonicalPath: "/",
+        image: DEFAULT_OG_IMAGE,
+        type: "website",
+        schema: {
+          "@context": "https://schema.org",
+          "@type": "WebSite",
+          name: SITE_NAME,
+          url: SITE_URL,
+        },
+      });
+      return;
+    }
+
+    const routePath = buildNewsRoute(newsItem.id, newsItem.title);
+    const description = truncateText(newsItem.description || DEFAULT_SEO_DESCRIPTION, 180);
+    const publishedDate = getPublishedDate(newsItem.publishedAt);
+
+    applySeoMetadata({
+      title: `${newsItem.title} | ${SITE_NAME}`,
+      description,
+      canonicalPath: routePath,
+      image: newsItem.image || DEFAULT_OG_IMAGE,
+      type: "article",
+      schema: {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        headline: newsItem.title,
+        description,
+        image: [newsItem.image || DEFAULT_OG_IMAGE],
+        datePublished: publishedDate ? publishedDate.toISOString() : undefined,
+        dateModified: publishedDate ? publishedDate.toISOString() : undefined,
+        articleSection: newsItem.category || "Gundem",
+        mainEntityOfPage: buildAbsoluteAppUrl(routePath),
+        publisher: {
+          "@type": "Organization",
+          name: SITE_NAME,
+          url: SITE_URL,
+          logo: {
+            "@type": "ImageObject",
+            url: `${SITE_URL}/favicon.svg`,
+          },
+        },
+        isBasedOn: newsItem.url,
+        author: {
+          "@type": "Organization",
+          name: newsItem.source || SITE_NAME,
+        },
+      },
+    });
+  }, [newsItem]);
+
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', background: darkMode ? "#000" : "#f8f9fa", color: darkMode ? "#f5f5f7" : "#1d1d1f" }}>
