@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+﻿import { useState, useEffect, useRef, useCallback } from 'react';
 import { Flame, Moon, Sun, Menu, X, ArrowUp, ExternalLink, RefreshCw, AlertCircle } from 'lucide-react';
 import { db } from './firebase';
-import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, setDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, doc, getDoc, getDocs, setDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { formatDistanceToNow } from 'date-fns';
 import { tr } from 'date-fns/locale';
 
@@ -51,13 +51,10 @@ const normalizeText = (value = "") =>
 
 const normalizeSourceName = (value = "") => {
   const normalized = normalizeText(value);
-  if (normalized === "CNN Türk") return "CNN Turk";
-  if (normalized === "Hürriyet") return "Hurriyet";
-  if (normalized === "Sözcü") return "Sozcu";
-  if (normalized === "CNN Türk") return "CNN Turk";
-  if (normalized === "Habertürk") return "Haberturk";
-  if (normalized === "Hürriyet") return "Hurriyet";
-  if (normalized === "Sözcü") return "Sozcu";
+  if (normalized === "CNN TÃ¼rk") return "CNN Turk";
+  if (normalized === "HabertÃ¼rk") return "Haberturk";
+  if (normalized === "HÃ¼rriyet") return "Hurriyet";
+  if (normalized === "SÃ¶zcÃ¼") return "Sozcu";
   return normalized;
 };
 
@@ -188,6 +185,43 @@ const buildSliderNews = (items = [], limitCount = 20) => {
   return sliderItems;
 };
 
+const buildGridNews = (items = [], limitCount = 40) => {
+  const sortedItems = sortNewsByDate(items);
+  const bySource = new Map();
+
+  for (const item of sortedItems) {
+    const source = normalizeSourceName(item.source || "Bilinmeyen");
+    const bucket = bySource.get(source) || [];
+    bucket.push({ ...item, source });
+    bySource.set(source, bucket);
+  }
+
+  const sourceNames = Array.from(bySource.keys());
+  const gridItems = [];
+  const seenUrls = new Set();
+  let round = 0;
+
+  while (gridItems.length < limitCount) {
+    let addedInRound = false;
+
+    for (const source of sourceNames) {
+      const bucket = bySource.get(source) || [];
+      const item = bucket[round];
+      if (!item || seenUrls.has(item.url)) continue;
+      gridItems.push(item);
+      seenUrls.add(item.url);
+      addedInRound = true;
+
+      if (gridItems.length >= limitCount) break;
+    }
+
+    if (!addedInRound) break;
+    round += 1;
+  }
+
+  return sortNewsByDate(gridItems);
+};
+
 function App() {
   const [allNews, setAllNews] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -202,7 +236,6 @@ function App() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
 
-  const isRunning = useRef(false);
   const syncInFlight = useRef(false);
   const isDragging = useRef(false);
   const startX = useRef(0);
@@ -432,6 +465,16 @@ function App() {
     setLoading(true);
 
     const q = query(collection(db, "news"), orderBy("publishedAt", "desc"), limit(FIRESTORE_QUERY_LIMIT));
+    try {
+      const initialSnapshot = await getDocs(q);
+      const initialData = initialSnapshot.docs.map((newsDoc) => normalizeNewsItem({ id: newsDoc.id, ...newsDoc.data() }));
+      setAllNews(balanceNewsBySource(initialData));
+    } catch {
+      // Keep snapshot listener below as a fallback even if the first read fails.
+    } finally {
+      setLoading(false);
+    }
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map((newsDoc) => normalizeNewsItem({ id: newsDoc.id, ...newsDoc.data() }));
       setAllNews(balanceNewsBySource(data));
@@ -458,9 +501,6 @@ function App() {
       document.documentElement.setAttribute('data-theme', 'dark');
     }
 
-    if (isRunning.current) return undefined;
-    isRunning.current = true;
-
     const unsubscribePromise = startApp();
     const intervalId = window.setInterval(async () => {
       const lastTime = await refreshSyncStatus();
@@ -482,7 +522,7 @@ function App() {
   );
   const sliderLimit = isMobile ? 8 : 20;
   const sliderHaberler = buildSliderNews(filteredNews, sliderLimit);
-  const gridHaberler = filteredNews.slice(0, visibleCount);
+  const gridHaberler = buildGridNews(filteredNews, visibleCount);
 
   useEffect(() => {
     setCurrentSlide(0);
@@ -679,6 +719,8 @@ function App() {
         .btn-more { display: inline-flex; align-items: center; justify-content: center; min-width: 220px; padding: 14px 22px; border-radius: 999px; border: 1px solid rgba(255, 59, 48, 0.18); background: linear-gradient(135deg, rgba(255,255,255,0.98), rgba(255,244,243,0.96)); color: var(--text-main); font-size: 0.98rem; font-weight: 800; letter-spacing: 0.01em; box-shadow: 0 14px 30px rgba(17, 24, 39, 0.08), inset 0 1px 0 rgba(255,255,255,0.9); cursor: pointer; transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease, background 0.22s ease; }
         .btn-more:hover { transform: translateY(-2px); border-color: rgba(255, 59, 48, 0.35); box-shadow: 0 18px 36px rgba(255, 59, 48, 0.14), inset 0 1px 0 rgba(255,255,255,0.95); background: linear-gradient(135deg, rgba(255,255,255,1), rgba(255,238,235,1)); }
         .btn-more:active { transform: translateY(0); box-shadow: 0 10px 20px rgba(255, 59, 48, 0.12); }
+        [data-theme='dark'] .btn-more { color: #f5f5f7; border-color: rgba(255,255,255,0.14); background: linear-gradient(135deg, rgba(46,46,50,0.98), rgba(28,28,30,0.96)); box-shadow: 0 14px 30px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.05); }
+        [data-theme='dark'] .btn-more:hover { border-color: rgba(255, 99, 88, 0.4); background: linear-gradient(135deg, rgba(56,56,60,1), rgba(34,34,36,1)); box-shadow: 0 18px 36px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.06); }
 
         .scroll-to-top { position: fixed; bottom: 40px; right: 40px; background: var(--primary); color: white; width: 60px; height: 60px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.4s; z-index: 1500; cursor: pointer; box-shadow: 0 10px 30px rgba(255, 59, 48, 0.4); }
         .scroll-to-top.visible { opacity: 1; visibility: visible; }
